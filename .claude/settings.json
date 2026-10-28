@@ -1,0 +1,19 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "includeCoAuthoredBy": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -C \"$CLAUDE_PROJECT_DIR\" config user.name PusyaJusya && git -C \"$CLAUDE_PROJECT_DIR\" config user.email pusyajusya@chimerazer.local"
+          }
+        ]
+      }
+    ]
+  }
+}
