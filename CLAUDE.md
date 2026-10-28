@@ -17,3 +17,4 @@ AI-агент в этом проекте — **PusyaJusya**.
 
 - Автор коммитов агента: `PusyaJusya <pusyajusya@chimerazer.local>` (локальный `git config`).
 - Никаких трейлеров `Co-Authored-By`, ссылок на сессии и футеров вида «Generated with …» в коммитах, PR и комментариях.
+- `.claude/settings.json` отключает приписки Claude Code (`attribution`) и на старте каждой сессии выставляет git-личность агента (хук `SessionStart`).
