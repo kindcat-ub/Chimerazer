@@ -141,14 +141,18 @@ fn read(args: &[String]) -> Result<(), String> {
         "status   {:?}  data_size {}",
         response.status, response.data_size
     );
-    println!(
-        "args     {}",
-        hex(&response.args[..usize::from(response.data_size).max(1)])
-    );
+    println!("args     {}", hex(significant_args(&response.args)));
     if let Some(decoded) = decode(spec, &bytes, &response) {
         println!("decoded  {decoded}");
     }
     Ok(())
+}
+
+/// Arguments up to the last non-zero byte. `data_size` is not used: the
+/// Naga Pro reports 0 for `05:80`/`05:84` and 5 for the 30-slot `02:84`.
+fn significant_args(args: &[u8]) -> &[u8] {
+    let end = args.iter().rposition(|&b| b != 0).map_or(1, |i| i + 1);
+    &args[..end]
 }
 
 fn decode(spec: &CommandSpec, req: &[u8], r: &Response) -> Option<String> {

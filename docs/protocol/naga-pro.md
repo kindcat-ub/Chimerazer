@@ -25,7 +25,7 @@
 | `02:84` | инвентарь кнопок | `05` | `00 00 00 00 00` | `ExternalHardware` | `opensnek-naga-side-panels` | `[count, slot…]`; на Naga Pro 30 слотов. |
 | `02:8C` | функция кнопки | `0A` | `[storage, slot, hypershift]` | `ExternalHardware` | `opensnek-naga-default-banks`, `opensnek-naga-button-encoding` | Ответ: `args[2]` — сохранённый флаг слоя (не эхо), блок всегда в `args[3..10]`. |
 | `04:85` | DPI | `07` | `[storage]` | `ExternalHardware` | `opensnek-naga-default-banks`, `openrazer-mouse` | `[storage, x_be16, y_be16]`. |
-| `04:86` | стадии DPI | `26` | `[storage]` | `ExternalHardware` | `opensnek-naga-default-banks`, `openrazer-mouse` | `[storage, active_id, count, count×[id, x, y, 0, 0]]`; `active_id` — токен, а не индекс. На Naga Pro два «резервных» байта строки не нулевые: в захвате они повторяют значение DPI (`01 01 90 01 90 01 90`). При записи их нужно сохранять. |
+| `04:86` | стадии DPI | `26` | `[storage]` | `ExternalHardware` | `opensnek-naga-default-banks`, `openrazer-mouse` | `[storage, active_id, count, count×[id, x, y, 0, 0]]`; `active_id` — токен, а не индекс. В хранимых банках профилей два «резервных» байта строки не нулевые: в захвате OpenSnek они повторяют значение DPI (`01 01 90 01 90 01 90`); в живом слое (`storage 0`) на нашем экземпляре они нулевые. При записи их нужно сохранять как прочитано. |
 | `05:80` | число профилей | `00` | — | `ExternalHardware` | `opensnek-naga-default-banks` | |
 | `05:81` | список профилей | `00` | — | `ExternalHardware` | `opensnek-naga-default-banks` | `[max_id, assigned…]`. |
 | `05:84` | активный профиль | `00` | — | `ExternalHardware` | `opensnek-naga-default-banks` | Может вернуть `data_size = 0` с валидным `args[0]`. |
@@ -36,6 +36,8 @@
 | `07:84` | статус зарядки | `02` | — | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | `args[1] == 1` — заряжается. |
 | `0F:82` | состояние эффекта LED | `0C` | `[storage, led]` | `SourceOnly` | `opensnek-crud-spec` | Проверено только на Basilisk V3 Pro. |
 | `0F:84` | яркость LED | `03` | `[storage, led]` | `ExternalHardware` | `opensnek-naga-default-banks`, `opensnek-device-support` | LED: `01` колесо, `04` логотип. |
+
+`data_size` в ответах Naga Pro ненадёжен: `05:80` и `05:84` возвращают `0` при значимом `args[0]`, `02:84` — `5` при 30 слотах в аргументах. Декодеры его не используют.
 
 Хранилища (`storage`): `0` — живой слой, `1..5` — onboard-профили (`opensnek-crud-spec`).
 
