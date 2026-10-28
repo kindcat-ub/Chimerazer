@@ -18,11 +18,13 @@ fn rules_cover_all_product_ids() {
     for usb in &naga_pro::USB_IDS {
         let vendor = format!("ATTRS{{idVendor}}==\"{RAZER_VENDOR_ID:04x}\"");
         let product = format!("ATTRS{{idProduct}}==\"{:04x}\"", usb.product_id);
+        let interface = format!("ATTRS{{bInterfaceNumber}}==\"{:02x}\"", usb.interface);
         assert!(
             rule_lines.iter().any(|l| {
                 l.contains("KERNEL==\"hidraw*\"")
                     && l.contains(&vendor)
                     && l.contains(&product)
+                    && l.contains(&interface)
                     && l.contains("TAG+=\"uaccess\"")
             }),
             "no hidraw rule for {:04x}",

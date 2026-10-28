@@ -1,17 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/devices"]
+members = ["crates/protocol", "crates/transport", "crates/devices", "apps/cli"]
 
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/kindcat-ub/Chimerazer"
 publish = false
 
 [workspace.dependencies]
 chimerazer-protocol = { path = "crates/protocol" }
+chimerazer-transport = { path = "crates/transport" }
+chimerazer-devices = { path = "crates/devices" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

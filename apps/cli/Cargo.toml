@@ -1,0 +1,21 @@
+[package]
+name = "chimerazer-cli"
+description = "Command-line interface: device discovery and read-only commands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "chimerazer"
+path = "src/main.rs"
+
+[dependencies]
+chimerazer-protocol.workspace = true
+chimerazer-transport.workspace = true
+chimerazer-devices.workspace = true
+
+[lints]
+workspace = true

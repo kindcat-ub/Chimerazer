@@ -5,10 +5,14 @@
 //! `docs/protocol/<device>.md` and a test keeps the two in sync.
 
 use std::fmt;
+use std::time::Duration;
 
 use chimerazer_protocol::{ArgsTooLong, Command, Request};
 
+mod exchange;
 pub mod naga_pro;
+
+pub use exchange::{ExchangeError, Trace, exchange};
 
 /// Razer USB vendor ID.
 pub const RAZER_VENDOR_ID: u16 = 0x1532;
@@ -28,6 +32,8 @@ pub struct UsbId {
     /// USB interface number that accepts 90-byte feature reports.
     pub interface: u8,
     pub transaction_id: u8,
+    /// Wait between sending a request and the first response read.
+    pub response_delay: Duration,
 }
 
 /// How far a command has been confirmed on this device model.
