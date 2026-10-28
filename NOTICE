@@ -1,0 +1,19 @@
+Chimerazer
+Copyright 2026 Chimerazer contributors
+
+This product includes data and protocol knowledge derived from OpenSnek
+(https://github.com/gh123man/OpenSnek), licensed under the Apache License,
+Version 2.0. Copyright 2026 OpenSnek contributors.
+
+  - fixtures/naga-pro/opensnek-captures.txt: response payloads taken from
+    OpenSnek hardware captures (commit b4e0f666d21b52efc0a64a0e128a1278aa1b3ad2).
+  - crates/devices/src/naga_pro.rs: Razer Naga Pro button slot table and
+    command facts.
+
+Technical facts (command numbers, report layout, product IDs, timing) were
+also cross-checked against OpenRazer (https://github.com/openrazer/openrazer)
+and Snakecharmer (https://github.com/asavs/snakecharmer). No code from those
+GPL-licensed projects is included.
+
+Razer, Naga and BlackWidow are trademarks of Razer Inc. Chimerazer is not
+affiliated with or endorsed by Razer Inc.

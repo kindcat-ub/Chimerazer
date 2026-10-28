@@ -1,0 +1,65 @@
+# Razer Naga Pro, 2.4 GHz receiver 1532:0090. Response argument payloads.
+#
+# Derived from OpenSnek (Apache-2.0, Copyright 2026 OpenSnek contributors),
+# commit b4e0f666d21b52efc0a64a0e128a1278aa1b3ad2. See NOTICE.
+#
+# Format:
+#   args <CC:II> <hex bytes>   response args[0..] of a read command
+#   block <slot> <hex bytes>   7-byte button function block stored for a slot
+#
+# --- opensnek-naga-default-banks: A-probe-log.txt, stored bank profile 3
+# (unassigned bank holding firmware defaults; profiles 4 and 5 are identical).
+# Lines below are copied from the raw= fields of the log.
+args 04:85 03 06 40 06 40 00 00
+args 04:86 03 03 05 01 01 90 01 90 01 90 02 03 20 03 20 03 20 03 06 40 06 40 06 40 04 0c 80 0c 80 0c 80 05 19 00 19 00 19 00
+args 0F:84 03 01 55
+args 0F:84 03 04 55
+block 1 01 01 01 00 00 00 00
+block 2 01 01 02 00 00 00 00
+block 3 01 01 03 00 00 00 00
+block 4 01 01 04 00 00 00 00
+block 5 01 01 05 00 00 00 00
+block 9 01 01 09 00 00 00 00
+block 10 01 01 0a 00 00 00 00
+block 11 06 01 01 00 00 00 00
+block 12 06 01 02 00 00 00 00
+block 14 07 01 04 00 00 00 00
+block 52 0e 01 09 00 14 00 00
+block 53 0e 01 0a 00 14 00 00
+block 64 02 01 00 1e 00 00 00
+block 65 02 01 00 1f 00 00 00
+block 66 02 01 00 20 00 00 00
+block 67 02 01 00 21 00 00 00
+block 68 02 01 00 22 00 00 00
+block 69 02 01 00 23 00 00 00
+block 70 02 01 00 24 00 00 00
+block 71 02 01 00 25 00 00 00
+block 72 02 01 00 26 00 00 00
+block 73 02 01 00 27 00 00 00
+block 74 02 01 00 2d 00 00 00
+block 75 02 01 00 2e 00 00 00
+block 80 02 01 00 1e 00 00 00
+block 81 02 01 00 1f 00 00 00
+block 82 02 01 00 20 00 00 00
+block 83 02 01 00 21 00 00 00
+block 84 02 01 00 22 00 00 00
+block 85 02 01 00 23 00 00 00
+
+# --- opensnek-naga-default-banks: A-probe-log.txt, decoded summary lines
+# ("summary ... payload=02 02 00", "profile-count value=2",
+#  "profile-inventory maxProfile=0x05 assigned=[0x01,0x02]",
+#  "active-profile value=1"), re-encoded into the documented argument layout.
+args 00:87 02 02 00
+args 05:80 02
+args 05:81 05 01 02
+args 05:84 01
+#
+# --- opensnek-naga-side-panels: README.md, "count=30 slots=[...]" from 02:84,
+# re-encoded as [count, slots..].
+args 02:84 1e 01 02 03 34 35 0e 0b 0c 40 41 42 43 44 45 46 47 48 49 4a 4b 50 51 52 53 54 55 05 04 09 0a
+#
+# --- opensnek-naga-button-encoding: USBButtonHydrationTests.swift, 02:8C
+# responses captured from a Synapse-configured Naga Pro (args[0..10]).
+# The stored layer flag (args[2]) is 1, not an echo of the requested layer 0.
+args 02:8C 01 02 01 01 01 02 05 00 00 02
+args 02:8C 01 09 01 01 01 09 e4 00 00 02
