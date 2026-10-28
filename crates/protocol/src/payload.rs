@@ -90,7 +90,9 @@ impl DpiStages {
         let rows = &args[3..];
         need(rows, usize::from(count) * Self::ROW)?;
         let stages = rows
-            .chunks_exact(Self::ROW)
+            .as_chunks::<{ Self::ROW }>()
+            .0
+            .iter()
             .take(count.into())
             .map(|r| DpiStage {
                 id: r[0],
