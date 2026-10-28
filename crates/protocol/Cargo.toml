@@ -1,0 +1,12 @@
+[package]
+name = "chimerazer-protocol"
+description = "Razer 90-byte HID feature report: encoding, CRC, response validation, payload decoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
