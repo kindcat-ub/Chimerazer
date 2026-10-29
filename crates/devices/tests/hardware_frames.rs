@@ -171,7 +171,15 @@ fn all_button_slots_decode() {
             .map(|f| {
                 let (storage, slot) = (f.request[8], f.request[9]);
                 let args = Response::parse(&f.response).unwrap().args;
-                naga_pro::decode_button_function(&args, storage, slot).unwrap();
+                let f = naga_pro::decode_button_function(&args, storage, slot).unwrap();
+                // Every binding on our unit is a known form and encodes
+                // back to the same bytes.
+                let b = naga_pro::binding::Binding::decode(&f.block);
+                assert!(
+                    !matches!(b, naga_pro::binding::Binding::Raw(_)),
+                    "{slot}: {b}"
+                );
+                assert_eq!(b.encode(), f.block, "{slot}");
                 slot
             })
             .collect();

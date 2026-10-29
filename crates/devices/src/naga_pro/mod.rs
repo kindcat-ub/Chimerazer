@@ -4,6 +4,7 @@
 //! OpenRazer; see `docs/protocol/naga-pro.md` for the provenance of every
 //! command.
 
+pub mod binding;
 pub mod params;
 pub mod restore;
 #[cfg(test)]
@@ -434,6 +435,14 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
 
 /// Write commands implemented in code. Every first write goes through
 /// [`params`] validation; see `docs/ARCHITECTURE.md`.
+/// `02:0C`: `[storage, slot, hypershift, block×7]`. Only layer 0 is written.
+pub const SET_BUTTON_FUNCTION: CommandSpec = CommandSpec {
+    command: Command::new(0x02, 0x0C, 0x0A),
+    name: "set button function",
+    confirmation: Confirmation::ExternalHardware,
+    sources: &["opensnek-naga-side-panels", "opensnek-naga-default-banks"],
+};
+
 /// `0F:02` static colour: `[storage, led, 01, 00, 00, 01, r, g, b]`.
 pub const SET_LED_STATIC: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x02, 0x09),
@@ -457,6 +466,7 @@ pub const WRITE_COMMANDS: &[CommandSpec] = &[
     SET_LED_BRIGHTNESS,
     SET_LED_STATIC,
     SET_LED_SPECTRUM,
+    SET_BUTTON_FUNCTION,
 ];
 
 /// A 7-byte button function block: `[class, len, data..]`.

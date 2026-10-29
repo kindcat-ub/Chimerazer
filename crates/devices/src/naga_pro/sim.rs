@@ -27,6 +27,8 @@ pub struct Sim {
     pub brightness: HashMap<(u8, u8), u8>,
     /// `0F:82` effect bytes (`args[2..12]`) by storage and LED.
     pub effect: HashMap<(u8, u8), [u8; 10]>,
+    /// `02:8C` stored flag and block by storage and slot.
+    pub buttons: HashMap<(u8, u8), (u8, [u8; 7])>,
     pub poll: u8,
     pub ignore_writes: bool,
     /// A write to DPI also changes brightness on storage 0, LED 1.
@@ -57,6 +59,10 @@ impl Sim {
             for led in [0x01, 0x04] {
                 s.effect.insert((st, led), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             }
+            for slot in BUTTON_SLOTS {
+                let block = [0x02, 0x02, 0, 0x1E, 0, 0, 0];
+                s.buttons.insert((st, slot.id), (1, block));
+            }
         }
         s
     }
@@ -85,6 +91,10 @@ impl FeatureIo for Sim {
                 (0x0F, 0x04) => {
                     self.brightness.insert((a[0], a[1]), a[2]);
                 }
+                (0x02, 0x0C) => {
+                    let entry = self.buttons.get_mut(&(a[0], a[1])).unwrap();
+                    entry.1.copy_from_slice(&a[3..10]);
+                }
                 (0x0F, 0x02) => {
                     let mut e = [0; 10];
                     let n = usize::from(report[5]).saturating_sub(2).min(10);
@@ -103,6 +113,11 @@ impl FeatureIo for Sim {
                     args[1..1 + t.len()].copy_from_slice(t);
                 }
                 (0x0F, 0x84) => args[2] = self.brightness[&(a[0], a[1])],
+                (0x02, 0x8C) => {
+                    let (flag, block) = self.buttons[&(a[0], a[1])];
+                    args[2] = flag;
+                    args[3..10].copy_from_slice(&block);
+                }
                 (0x0F, 0x82) => args[2..12].copy_from_slice(&self.effect[&(a[0], a[1])]),
                 (0x02, 0x84) => {
                     args[0] = 30;

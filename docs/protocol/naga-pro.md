@@ -58,7 +58,7 @@
 | Команда | Назначение | Size | Аргументы | Статус | Источники | Примечание |
 |---|---|---|---|---|---|---|
 | `00:05` | частота опроса | `01` | `[rate]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
-| `02:0C` | функция кнопки | `0A` | `[storage, slot, hypershift, block×7]` | `ExternalHardware` | `opensnek-naga-side-panels`, `opensnek-naga-default-banks` | Устройство иногда возвращает ошибку, хотя запись прошла. Проверять только чтением. |
+| `02:0C` | функция кнопки | `0A` | `[storage, slot, hypershift, block×7]` | `ExternalHardware` | `opensnek-naga-side-panels`, `opensnek-naga-default-banks` | В коде: `SET_BUTTON_FUNCTION`, пишется только слой `00`. Устройство иногда возвращает ошибку, хотя запись прошла. Проверять только чтением. |
 | `04:05` | DPI | `07` | `[storage, x_be16, y_be16, 0, 0]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support`, `openrazer-mouse`, `snakecharmer-spec` | Наш экземпляр: запись в `storage 0` применяется сразу и сбрасывается при переподключении (`docs/validation/naga-pro/04-05-dpi.md`). Источники расходятся по флагу сохранения: OpenRazer всегда шлёт `01`, Snakecharmer — `00`, OpenSnek — `00` для живого слоя. |
 | `04:06` | стадии DPI | `26` | `[storage, active_id, count, rows]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support`, `openrazer-mouse` | OpenSnek всегда пишет 5 строк с `count = 5`. |
 | `05:02` | создать профиль | `01` | `[profile]` | `SourceOnly` | `opensnek-crud-spec` | Сбивает DPI и яркость, после него нужна перезапись. |
@@ -70,6 +70,22 @@
 | `0F:02` | эффект LED: статический цвет | `09` | `[storage, led, 01, 00, 00, 01, r, g, b]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support` | В коде: `SET_LED_STATIC`. Чтение обратно — `0F:82`. На нашем экземпляре работает в живом слое и в профиле 1, переживает выключение (`docs/validation/naga-pro/0F-02-led-effect.md`). |
 | `0F:02` | эффект LED: Spectrum | `06` | `[storage, led, 03, 00, 00, 00]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-naga-v3-pro-effects` | В коде: `SET_LED_SPECTRUM`. Этой формой OpenSnek возвращал Spectrum на Naga V3 Pro. На нашем экземпляре возвращает Spectrum байт в байт (`docs/validation/naga-pro/0F-02-led-effect.md`). |
 | `0F:04` | яркость LED | `03` | `[storage, led, value]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support` | |
+
+## Кодирование назначения кнопки
+
+Блок из 7 байт в `02:8C`/`02:0C`: `[класс, длина, данные…]`. Кодек — `naga_pro::binding`. Источники: `opensnek-naga-default-banks`, `opensnek-naga-side-panels`, `opensnek-naga-button-encoding`, наши чтения (`chimerazer-m1-reads`). Родные блоки прошивки и записанные Synapse/OpenSnek отличаются байтом длины при тех же данных; кодек сохраняет форму, неизвестные блоки хранит как есть.
+
+| Класс | Назначение | Формы | Текст в CLI |
+|---|---|---|---|
+| `00` | отключено | `00 00 00 00 00 00 00` | `disabled` |
+| `01` | кнопка мыши: `01` Л, `02` П, `03` СР, `04` назад, `05` вперёд, `09`/`0A` колесо | `01 01 <btn>` | `mouse:back` |
+| `02` | клавиша с модификаторами (HID) | `02 02 <mods> <key>`, родная `02 01 00 <key>` | `key:ctrl+f5` |
+| `0D` | клавиша с турбо | `0d 04 <mods> <key> <rate_hi> <rate_lo>` | `key:up turbo=55` |
+| `0E` | кнопка мыши с турбо, наклоны колеса | `0e 03 <btn> <rate_hi> <rate_lo>`, родная `0e 01 …` | `mouse:scroll-up turbo=100` |
+| `06` | DPI: `01` вниз, `02` вверх, `06` цикл | `06 01 <action>` | `dpi:down` |
+| `07` | цикл профилей | `07 01 04` | `profile-cycle` |
+
+Вариант Synapse `01 01 01 <btn> e4` (OpenSnek) не разобран и остаётся сырым (`raw:`). Байт `args[2]` ответа — сохранённый флаг с неизвестным смыслом: на нашем экземпляре `01` у слотов 1, 2, 4, 5, 9, 10, 14, 64–75 и `00` у остальных. Слой HyperShift (`hypershift = 01`) на Naga Pro не исследован.
 
 ## Проверено на нашем экземпляре (M1)
 

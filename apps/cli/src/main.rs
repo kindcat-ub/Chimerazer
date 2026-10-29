@@ -25,6 +25,7 @@ usage:
   chimerazer finish <STATE> --baseline DUMP [--log FILE]
   chimerazer restore <DUMP> [--dry-run] [--pid PID] [--log FILE]
   chimerazer set ITEM.. [--pid PID]
+  chimerazer buttons <DUMP> [--storage N]
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
@@ -53,7 +54,13 @@ usage:
          reports what would change.
   set    writes values in normal mode (ITEM as for hold, e.g. dpi:1:800,
          effect:1:logo:ff00ff); only writes verified on this link, each
-         read back. Stops at the first failure.";
+         read back. Stops at the first failure.
+         Buttons: button:<storage>:<slot>:<binding>, binding is disabled,
+         mouse:<left|right|middle|back|forward|scroll-up|scroll-down>,
+         key:[mods+]<key> (ctrl shift alt super, r-prefixed for right),
+         dpi:<down|up|cycle>, profile-cycle or raw:<14 hex>; turbo=<rate>
+         after mouse/key (key:up,turbo=55 or quoted \"key:up turbo=55\").
+  buttons  decodes the 30 button slots of a dump (no device access).";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,6 +74,7 @@ fn main() -> ExitCode {
         Some("finish") => finish(&args[1..]),
         Some("restore") => restore(&args[1..]),
         Some("set") => set(&args[1..]),
+        Some("buttons") => buttons(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -266,6 +274,19 @@ fn validate(args: &[String]) -> Result<(), String> {
 
 /// `dpi:1:800`, `dpi-stages:1:active=2`, `brightness:1:logo:100`.
 fn parse_item(item: &str) -> Result<(naga_pro::params::Param, String), String> {
+    // The binding text may contain ':' itself (key:ctrl+f5).
+    if let Some(rest) = item.strip_prefix("button:") {
+        let mut parts = rest.splitn(3, ':');
+        let (Some(st), Some(slot), Some(binding)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format!("bad item {item} (e.g. button:1:80:key:f5)"));
+        };
+        let num = |s: &str| s.parse::<u8>().map_err(|_| format!("bad number in {item}"));
+        return Ok((
+            naga_pro::params::Param::button(num(st)?, num(slot)?)?,
+            binding.to_string(),
+        ));
+    }
     let parts: Vec<&str> = item.split(':').collect();
     let storage = |s: &str| {
         s.parse::<u8>()
@@ -373,6 +394,7 @@ fn param_token(p: naga_pro::params::Param) -> String {
     use naga_pro::params::Param::*;
     match p {
         PollRate => "poll-rate:0".into(),
+        Button { storage, slot } => format!("button:{storage}:{slot}"),
         Dpi { storage } => format!("dpi:{storage}"),
         DpiStages { storage } => format!("dpi-stages:{storage}"),
         Brightness { storage, led } | Effect { storage, led } => format!(
@@ -650,6 +672,34 @@ fn set(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn buttons(args: &[String]) -> Result<(), String> {
+    use naga_pro::params::Param;
+
+    let (path, rest) = args.split_first().ok_or(USAGE)?;
+    let storage = match rest {
+        [] => 1,
+        [flag, n] if flag == "--storage" => n.parse().map_err(|_| format!("bad storage {n}"))?,
+        _ => return Err(USAGE.to_string()),
+    };
+    let dump = load_baseline(path, &naga_pro::MODEL)?;
+    for slot in naga_pro::BUTTON_SLOTS {
+        let param = Param::button(storage, slot.id)?;
+        let key = param.dump_key();
+        let shown = match dump.get(&key).map(|v| (v, param.from_dump(v))) {
+            Some((v, Ok(block))) => format!("{:<28} {v}", param.render(&block)),
+            Some((v, Err(_))) => v.clone(),
+            None => "-".into(),
+        };
+        println!(
+            "{:>3}  {:<17} {:<16} {shown}",
+            slot.id,
+            format!("{:?}", slot.group),
+            slot.name
+        );
+    }
+    Ok(())
+}
+
 fn write_log(log: Option<String>, md: &str) -> Result<(), String> {
     match log {
         Some(path) => std::fs::write(&path, md).map_err(|e| format!("{path}: {e}")),
@@ -858,6 +908,8 @@ mod tests {
             "brightness:0:scroll_wheel:7",
             "effect:1:logo:ff00ff",
             "effect:0:scroll_wheel:spectrum",
+            "button:1:80:key:ctrl+f5",
+            "button:0:85:key:up turbo=55",
         ] {
             let (param, probe) = parse_item(item).unwrap();
             assert_eq!(format!("{}:{probe}", param_token(param)), item);
@@ -865,5 +917,7 @@ mod tests {
         assert!(parse_item("dpi:9:800").is_err());
         assert!(parse_item("brightness:1:nose:100").is_err());
         assert!(parse_item("dpi").is_err());
+        assert!(parse_item("button:1:6:key:a").is_err());
+        assert!(parse_item("button:1:80").is_err());
     }
 }

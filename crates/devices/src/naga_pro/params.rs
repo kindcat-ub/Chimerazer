@@ -11,6 +11,7 @@ use std::fmt;
 use chimerazer_protocol::ARGS_LEN;
 use chimerazer_transport::FeatureIo;
 
+use super::binding::Binding;
 use super::state::{compare, read_snapshot};
 use super::*;
 use crate::{
@@ -35,6 +36,12 @@ pub enum Param {
     Effect {
         storage: u8,
         led: u8,
+    },
+    /// Button binding (`02:8C` / `02:0C`), layer 0. The value is the
+    /// 7-byte function block ([`super::binding`]).
+    Button {
+        storage: u8,
+        slot: u8,
     },
 }
 
@@ -62,6 +69,9 @@ impl fmt::Display for Param {
             Self::Effect { storage, led } => {
                 write!(f, "effect (storage {storage}, led {led:#04x})")
             }
+            Self::Button { storage, slot } => {
+                write!(f, "button {slot} (storage {storage})")
+            }
         }
     }
 }
@@ -75,6 +85,17 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl Param {
+    /// A button binding of one of the 30 slots in `BUTTON_SLOTS`.
+    pub fn button(storage: u8, slot: u8) -> Result<Self, String> {
+        if storage != LIVE_STORAGE && !PROFILES.contains(&storage) {
+            return Err(format!("storage {storage} is not 0..=5"));
+        }
+        if !BUTTON_SLOTS.iter().any(|s| s.id == slot) {
+            return Err(format!("slot {slot} is not one of the 30 Naga Pro slots"));
+        }
+        Ok(Self::Button { storage, slot })
+    }
+
     /// Parses `poll-rate`, `dpi`, `dpi-stages`, `brightness`, `effect` with the
     /// storage and LED they apply to.
     pub fn parse(name: &str, storage: u8, led: Option<u8>) -> Result<Self, String> {
@@ -109,6 +130,7 @@ impl Param {
             Self::DpiStages { .. } => &DPI_STAGES,
             Self::Brightness { .. } => &LED_BRIGHTNESS,
             Self::Effect { .. } => &LED_EFFECT,
+            Self::Button { .. } => &BUTTON_FUNCTION,
         }
     }
 
@@ -119,6 +141,7 @@ impl Param {
             Self::DpiStages { .. } => &SET_DPI_STAGES,
             Self::Brightness { .. } => &SET_LED_BRIGHTNESS,
             Self::Effect { .. } => &SET_LED_STATIC,
+            Self::Button { .. } => &SET_BUTTON_FUNCTION,
         }
     }
 
@@ -142,6 +165,7 @@ impl Param {
             Self::Brightness { storage, led } | Self::Effect { storage, led } => {
                 vec![storage, led]
             }
+            Self::Button { storage, slot } => vec![storage, slot, 0],
         }
     }
 
@@ -177,6 +201,12 @@ impl Param {
                 echo(1, led)?;
                 Ok(args[2..12].to_vec())
             }
+            // args[2] is a stored flag, not an echo; the block follows it.
+            Self::Button { storage, slot } => {
+                echo(0, storage)?;
+                echo(1, slot)?;
+                Ok(args[3..10].to_vec())
+            }
         }
     }
 
@@ -196,6 +226,7 @@ impl Param {
                 };
                 [&[storage, led][..], &value[..n.min(value.len())]].concat()
             }
+            Self::Button { storage, slot } => [&[storage, slot, 0][..], value].concat(),
         }
     }
 
@@ -218,6 +249,7 @@ impl Param {
             Self::Effect { storage, led } => {
                 format!("{}.led.{}.effect", st(storage), led_name(led))
             }
+            Self::Button { storage, slot } => format!("{}.button.{slot:02}", st(storage)),
         }
     }
 
@@ -271,6 +303,14 @@ impl Param {
                 }
                 Ok(bytes)
             }
+            // `layer=<flag> block=<hex>`, as `state` writes it.
+            Self::Button { .. } => {
+                let hex = text
+                    .split_once("block=")
+                    .map(|(_, h)| h.replace(' ', ""))
+                    .ok_or(format!("bad button value {text}"))?;
+                Ok(Binding::parse(&format!("raw:{hex}"))?.encode().to_vec())
+            }
         }
     }
 
@@ -280,7 +320,8 @@ impl Param {
             Self::Dpi { storage }
             | Self::DpiStages { storage }
             | Self::Brightness { storage, .. }
-            | Self::Effect { storage, .. } => Some(storage),
+            | Self::Effect { storage, .. }
+            | Self::Button { storage, .. } => Some(storage),
         }
     }
 
@@ -292,6 +333,7 @@ impl Param {
             Self::Dpi { .. } => std::slice::from_ref(&SET_DPI),
             Self::DpiStages { .. } => std::slice::from_ref(&SET_DPI_STAGES),
             Self::Brightness { .. } => std::slice::from_ref(&SET_LED_BRIGHTNESS),
+            Self::Button { .. } => std::slice::from_ref(&SET_BUTTON_FUNCTION),
         }
     }
 
@@ -339,6 +381,10 @@ impl Param {
                 [EFFECT_STATIC, 0, 0, 1, r, g, b, ..] => format!("static #{r:02x}{g:02x}{b:02x}"),
                 [EFFECT_SPECTRUM, rest @ ..] if rest.iter().all(|&b| b == 0) => "spectrum".into(),
                 _ => format!("effect [{}]", hex(value)),
+            },
+            Self::Button { .. } => match <[u8; 7]>::try_from(value) {
+                Ok(b) => Binding::decode(&b).to_string(),
+                Err(_) => format!("[{}]", hex(value)),
             },
         }
     }
@@ -408,6 +454,7 @@ impl Param {
                 }
                 v
             }
+            Self::Button { .. } => Binding::parse(text)?.encode().to_vec(),
         };
         Ok(value)
     }
@@ -1276,6 +1323,30 @@ mod tests {
                 .any(|s| s.note.contains("cannot be written"))
         );
         assert_eq!(sim.effect[&(0, LED_LOGO)][0], 2);
+    }
+
+    #[test]
+    fn button_validation_writes_a_block_and_restores_it() {
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        let side1 = Param::button(0, 80).unwrap();
+        let report = validate(&mut sim, &USB, side1, "key:ctrl+f5", &base, FIRST);
+        assert!(report.passed, "{:#?}", report.steps);
+        let probe = report
+            .steps
+            .iter()
+            .find(|s| s.name == "write probe")
+            .unwrap();
+        assert_eq!(probe.got.as_deref(), Some("key:ctrl+f5"));
+        assert_eq!(
+            &probe.traces[0].request[8..18],
+            &[0, 80, 0, 0x02, 0x02, 0x01, 0x3E, 0, 0, 0]
+        );
+        assert_eq!(sim.buttons[&(0, 80)].1, [0x02, 0x02, 0, 0x1E, 0, 0, 0]);
+        // Not verified yet: normal mode refuses.
+        assert!(!side1.verified_on(crate::Link::Wired));
+        assert!(Param::button(1, 6).is_err());
+        assert!(Param::button(1, 13).is_err());
     }
 
     #[test]
