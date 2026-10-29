@@ -32,13 +32,15 @@ usage:
          (no serial number; transport details as `#` comments).
   diff   compares two dumps, ignoring comments and `volatile.*` keys.
   validate  first hardware validation of a write (M2): PARAM is poll-rate,
-         dpi, dpi-stages or brightness. Refuses to write unless DUMP has no
+         dpi, dpi-stages, brightness or effect (probe RRGGBB for static
+         colour, or spectrum). Refuses to write unless DUMP has no
          read errors and matches the device. Writes the same value, the
          probe and the original back, reading after each write, then checks
          the whole device against DUMP. --log writes the protocol (markdown).
   hold   persistence check for several values with one reconnect. ITEM is
          dpi:<storage>:<probe>, dpi-stages:<storage>:active=<id> or
-         brightness:<storage>:<logo|scroll_wheel>:<probe>. Writes each probe
+         brightness:<storage>:<logo|scroll_wheel>:<probe> or
+         effect:<storage>:<logo|scroll_wheel>:<RRGGBB|spectrum>. Writes each probe
          and leaves it in place; `finish` reads what survived the reconnect,
          restores the originals and checks the whole device against DUMP.
   restore  writes back the values of DUMP that have a verified write on
@@ -264,14 +266,14 @@ fn parse_item(item: &str) -> Result<(naga_pro::params::Param, String), String> {
             .map_err(|_| format!("bad storage in {item}"))
     };
     let (param, probe) = match parts.as_slice() {
-        ["brightness", st, led, probe] => {
+        [name @ ("brightness" | "effect"), st, led, probe] => {
             let led = match *led {
                 "scroll_wheel" => naga_pro::LED_SCROLL_WHEEL,
                 "logo" => naga_pro::LED_LOGO,
                 other => return Err(format!("unknown LED {other}")),
             };
             (
-                naga_pro::params::Param::parse("brightness", storage(st)?, Some(led))?,
+                naga_pro::params::Param::parse(name, storage(st)?, Some(led))?,
                 *probe,
             )
         }
@@ -367,8 +369,13 @@ fn param_token(p: naga_pro::params::Param) -> String {
         PollRate => "poll-rate:0".into(),
         Dpi { storage } => format!("dpi:{storage}"),
         DpiStages { storage } => format!("dpi-stages:{storage}"),
-        Brightness { storage, led } => format!(
-            "brightness:{storage}:{}",
+        Brightness { storage, led } | Effect { storage, led } => format!(
+            "{}:{storage}:{}",
+            if matches!(p, Effect { .. }) {
+                "effect"
+            } else {
+                "brightness"
+            },
             if led == naga_pro::LED_LOGO {
                 "logo"
             } else {
@@ -806,6 +813,8 @@ mod tests {
             "dpi-stages:1:active=2",
             "brightness:1:logo:100",
             "brightness:0:scroll_wheel:7",
+            "effect:1:logo:ff00ff",
+            "effect:0:scroll_wheel:spectrum",
         ] {
             let (param, probe) = parse_item(item).unwrap();
             assert_eq!(format!("{}:{probe}", param_token(param)), item);

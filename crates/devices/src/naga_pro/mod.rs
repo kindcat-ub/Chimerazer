@@ -416,8 +416,31 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
 
 /// Write commands implemented in code. Every first write goes through
 /// [`params`] validation; see `docs/ARCHITECTURE.md`.
-pub const WRITE_COMMANDS: &[CommandSpec] =
-    &[SET_POLL_RATE, SET_DPI, SET_DPI_STAGES, SET_LED_BRIGHTNESS];
+/// `0F:02` static colour: `[storage, led, 01, 00, 00, 01, r, g, b]`.
+pub const SET_LED_STATIC: CommandSpec = CommandSpec {
+    command: Command::new(0x0F, 0x02, 0x09),
+    name: "set LED effect: static",
+    confirmation: Confirmation::ExternalHardware,
+    sources: &["opensnek-device-support"],
+};
+
+/// `0F:02` spectrum cycling: `[storage, led, 03, 00, 00, 00]`. Observed on
+/// the Naga V3 Pro, not on the Naga Pro.
+pub const SET_LED_SPECTRUM: CommandSpec = CommandSpec {
+    command: Command::new(0x0F, 0x02, 0x06),
+    name: "set LED effect: spectrum",
+    confirmation: Confirmation::SourceOnly,
+    sources: &["opensnek-naga-v3-pro-effects"],
+};
+
+pub const WRITE_COMMANDS: &[CommandSpec] = &[
+    SET_POLL_RATE,
+    SET_DPI,
+    SET_DPI_STAGES,
+    SET_LED_BRIGHTNESS,
+    SET_LED_STATIC,
+    SET_LED_SPECTRUM,
+];
 
 /// A 7-byte button function block: `[class, len, data..]`.
 pub type FunctionBlock = [u8; 7];

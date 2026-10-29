@@ -25,6 +25,8 @@ pub struct Sim {
     pub dpi: HashMap<u8, [u8; 4]>,
     pub stages: HashMap<u8, Vec<u8>>,
     pub brightness: HashMap<(u8, u8), u8>,
+    /// `0F:82` effect bytes (`args[2..12]`) by storage and LED.
+    pub effect: HashMap<(u8, u8), [u8; 10]>,
     pub poll: u8,
     pub ignore_writes: bool,
     /// A write to DPI also changes brightness on storage 0, LED 1.
@@ -52,6 +54,9 @@ impl Sim {
             s.stages.insert(st, t);
             s.brightness.insert((st, 0x01), 51);
             s.brightness.insert((st, 0x04), 51);
+            for led in [0x01, 0x04] {
+                s.effect.insert((st, led), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            }
         }
         s
     }
@@ -80,6 +85,12 @@ impl FeatureIo for Sim {
                 (0x0F, 0x04) => {
                     self.brightness.insert((a[0], a[1]), a[2]);
                 }
+                (0x0F, 0x02) => {
+                    let mut e = [0; 10];
+                    let n = usize::from(report[5]).saturating_sub(2).min(10);
+                    e[..n].copy_from_slice(&a[2..2 + n]);
+                    self.effect.insert((a[0], a[1]), e);
+                }
                 _ => {}
             }
         }
@@ -92,6 +103,7 @@ impl FeatureIo for Sim {
                     args[1..1 + t.len()].copy_from_slice(t);
                 }
                 (0x0F, 0x84) => args[2] = self.brightness[&(a[0], a[1])],
+                (0x0F, 0x82) => args[2..12].copy_from_slice(&self.effect[&(a[0], a[1])]),
                 (0x02, 0x84) => {
                     args[0] = 30;
                     for (i, s) in BUTTON_SLOTS.iter().enumerate() {

@@ -21,9 +21,33 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Param {
     PollRate,
-    Dpi { storage: u8 },
-    DpiStages { storage: u8 },
-    Brightness { storage: u8, led: u8 },
+    Dpi {
+        storage: u8,
+    },
+    DpiStages {
+        storage: u8,
+    },
+    Brightness {
+        storage: u8,
+        led: u8,
+    },
+    /// LED effect (`0F:82` / `0F:02`); only static and spectrum are written.
+    Effect {
+        storage: u8,
+        led: u8,
+    },
+}
+
+/// Effect IDs `0F:02` may write.
+const EFFECT_STATIC: u8 = 0x01;
+const EFFECT_SPECTRUM: u8 = 0x03;
+
+fn led_name(led: u8) -> &'static str {
+    if led == LED_LOGO {
+        "logo"
+    } else {
+        "scroll_wheel"
+    }
 }
 
 impl fmt::Display for Param {
@@ -34,6 +58,9 @@ impl fmt::Display for Param {
             Self::DpiStages { storage } => write!(f, "dpi-stages (storage {storage})"),
             Self::Brightness { storage, led } => {
                 write!(f, "brightness (storage {storage}, led {led:#04x})")
+            }
+            Self::Effect { storage, led } => {
+                write!(f, "effect (storage {storage}, led {led:#04x})")
             }
         }
     }
@@ -48,7 +75,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 impl Param {
-    /// Parses `poll-rate`, `dpi`, `dpi-stages`, `brightness` with the
+    /// Parses `poll-rate`, `dpi`, `dpi-stages`, `brightness`, `effect` with the
     /// storage and LED they apply to.
     pub fn parse(name: &str, storage: u8, led: Option<u8>) -> Result<Self, String> {
         if storage != LIVE_STORAGE && !PROFILES.contains(&storage) {
@@ -58,15 +85,19 @@ impl Param {
             "poll-rate" => Ok(Self::PollRate),
             "dpi" => Ok(Self::Dpi { storage }),
             "dpi-stages" => Ok(Self::DpiStages { storage }),
-            "brightness" => {
-                let led = led.ok_or("brightness needs --led scroll_wheel|logo")?;
+            "brightness" | "effect" => {
+                let led = led.ok_or(format!("{name} needs --led scroll_wheel|logo"))?;
                 if led != LED_SCROLL_WHEEL && led != LED_LOGO {
                     return Err(format!("unknown LED {led:#04x}"));
                 }
-                Ok(Self::Brightness { storage, led })
+                Ok(if name == "effect" {
+                    Self::Effect { storage, led }
+                } else {
+                    Self::Brightness { storage, led }
+                })
             }
             other => Err(format!(
-                "unknown parameter {other} (poll-rate, dpi, dpi-stages, brightness)"
+                "unknown parameter {other} (poll-rate, dpi, dpi-stages, brightness, effect)"
             )),
         }
     }
@@ -77,6 +108,7 @@ impl Param {
             Self::Dpi { .. } => &DPI,
             Self::DpiStages { .. } => &DPI_STAGES,
             Self::Brightness { .. } => &LED_BRIGHTNESS,
+            Self::Effect { .. } => &LED_EFFECT,
         }
     }
 
@@ -86,6 +118,20 @@ impl Param {
             Self::Dpi { .. } => &SET_DPI,
             Self::DpiStages { .. } => &SET_DPI_STAGES,
             Self::Brightness { .. } => &SET_LED_BRIGHTNESS,
+            Self::Effect { .. } => &SET_LED_STATIC,
+        }
+    }
+
+    /// The write command for `value`: `0F:02` has one layout per effect.
+    /// `None` if this value cannot be written.
+    pub fn write_spec_for(&self, value: &[u8]) -> Option<&'static CommandSpec> {
+        match self {
+            Self::Effect { .. } => match value.first() {
+                Some(&EFFECT_STATIC) => Some(&SET_LED_STATIC),
+                Some(&EFFECT_SPECTRUM) => Some(&SET_LED_SPECTRUM),
+                _ => None,
+            },
+            _ => Some(self.write_spec()),
         }
     }
 
@@ -93,7 +139,9 @@ impl Param {
         match *self {
             Self::PollRate => vec![],
             Self::Dpi { storage } | Self::DpiStages { storage } => vec![storage],
-            Self::Brightness { storage, led } => vec![storage, led],
+            Self::Brightness { storage, led } | Self::Effect { storage, led } => {
+                vec![storage, led]
+            }
         }
     }
 
@@ -124,6 +172,11 @@ impl Param {
                 echo(1, led)?;
                 Ok(vec![args[2]])
             }
+            // The storage echo is not reliable on stored-profile reads.
+            Self::Effect { led, .. } => {
+                echo(1, led)?;
+                Ok(args[2..12].to_vec())
+            }
         }
     }
 
@@ -134,6 +187,15 @@ impl Param {
             Self::Dpi { storage } => [&[storage][..], value, &[0, 0]].concat(),
             Self::DpiStages { storage } => [&[storage][..], value].concat(),
             Self::Brightness { storage, led } => [&[storage, led][..], value].concat(),
+            // The layouts of `SET_LED_STATIC` and `SET_LED_SPECTRUM`.
+            Self::Effect { storage, led } => {
+                let n = if value.first() == Some(&EFFECT_STATIC) {
+                    7
+                } else {
+                    4
+                };
+                [&[storage, led][..], &value[..n.min(value.len())]].concat()
+            }
         }
     }
 
@@ -150,15 +212,12 @@ impl Param {
             Self::PollRate => "device.poll_rate".into(),
             Self::Dpi { storage } => format!("{}.dpi", st(storage)),
             Self::DpiStages { storage } => format!("{}.dpi_stages.raw", st(storage)),
-            Self::Brightness { storage, led } => format!(
-                "{}.led.{}.brightness",
-                st(storage),
-                if led == LED_LOGO {
-                    "logo"
-                } else {
-                    "scroll_wheel"
-                }
-            ),
+            Self::Brightness { storage, led } => {
+                format!("{}.led.{}.brightness", st(storage), led_name(led))
+            }
+            Self::Effect { storage, led } => {
+                format!("{}.led.{}.effect", st(storage), led_name(led))
+            }
         }
     }
 
@@ -202,6 +261,16 @@ impl Param {
             Self::Brightness { .. } => Ok(vec![
                 text.parse().map_err(|_| format!("bad brightness {text}"))?,
             ]),
+            Self::Effect { .. } => {
+                let bytes: Vec<u8> = text
+                    .split_whitespace()
+                    .map(|b| u8::from_str_radix(b, 16).map_err(|_| format!("bad effect {text}")))
+                    .collect::<Result<_, _>>()?;
+                if bytes.len() != 10 {
+                    return Err(format!("bad effect {text}"));
+                }
+                Ok(bytes)
+            }
         }
     }
 
@@ -211,7 +280,8 @@ impl Param {
             Self::PollRate => None,
             Self::Dpi { storage }
             | Self::DpiStages { storage }
-            | Self::Brightness { storage, .. } => Some(storage),
+            | Self::Brightness { storage, .. }
+            | Self::Effect { storage, .. } => Some(storage),
         };
         self.write_spec().confirmation == crate::Confirmation::OurHardware
             && VERIFIED_WRITES.iter().any(|s| {
@@ -235,6 +305,11 @@ impl Param {
             ),
             Self::DpiStages { .. } => format!("active={} [{}]", value[0], hex(value)),
             Self::Brightness { .. } => value[0].to_string(),
+            Self::Effect { .. } => match value {
+                [EFFECT_STATIC, 0, 0, 1, r, g, b, ..] => format!("static #{r:02x}{g:02x}{b:02x}"),
+                [EFFECT_SPECTRUM, rest @ ..] if rest.iter().all(|&b| b == 0) => "spectrum".into(),
+                _ => format!("effect [{}]", hex(value)),
+            },
         }
     }
 
@@ -276,6 +351,21 @@ impl Param {
             }
             Self::Brightness { .. } => {
                 vec![text.parse().map_err(|_| format!("bad brightness {text}"))?]
+            }
+            Self::Effect { .. } => {
+                let mut v = vec![0; 10];
+                if text == "spectrum" {
+                    v[0] = EFFECT_SPECTRUM;
+                } else {
+                    let hexrgb = text.trim_start_matches('#');
+                    let rgb = u32::from_str_radix(hexrgb, 16)
+                        .ok()
+                        .filter(|_| hexrgb.len() == 6)
+                        .ok_or("effect probe: spectrum or RRGGBB")?;
+                    let [_, r, g, b] = rgb.to_be_bytes();
+                    v[..7].copy_from_slice(&[EFFECT_STATIC, 0, 0, 1, r, g, b]);
+                }
+                v
             }
         };
         if value == original {
@@ -354,9 +444,12 @@ impl<IO: FeatureIo> Runner<'_, IO> {
     /// Sends one write. `Err(Refused)` means nothing was sent; any other
     /// error happened on the wire and says nothing about the device state.
     fn write(&mut self, value: &[u8], traces: &mut Vec<Trace>) -> Result<(), WriteError> {
+        let spec = self.param.write_spec_for(value).ok_or_else(|| {
+            WriteError::Refused(format!("{}: value cannot be written", self.param))
+        })?;
         let request = write_request(
             self.usb,
-            self.param.write_spec(),
+            spec,
             self.param.read_spec(),
             &self.param.write_args(value),
             self.mode,
@@ -1045,6 +1138,67 @@ mod tests {
     }
 
     #[test]
+    fn effect_validation_writes_static_and_restores_spectrum() {
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        let logo = Param::Effect {
+            storage: 0,
+            led: LED_LOGO,
+        };
+        // Restoring spectrum uses the SourceOnly layout: refused by default,
+        // before anything is sent.
+        let report = validate(&mut sim, &USB, logo, "ff00ff", &base, FIRST);
+        assert!(!report.passed);
+        assert!(report.steps.iter().any(|s| s.note.contains("SourceOnly")));
+        assert_eq!(sim.effect[&(0, LED_LOGO)][0], 3);
+
+        let allowed = WriteMode::FirstValidation {
+            allow_source_only: true,
+        };
+        let report = validate(&mut sim, &USB, logo, "ff00ff", &base, allowed);
+        assert!(report.passed, "{:#?}", report.steps);
+        let probe = report
+            .steps
+            .iter()
+            .find(|s| s.name == "write probe")
+            .unwrap();
+        assert_eq!(probe.got.as_deref(), Some("static #ff00ff"));
+        // Static is sent with size 09, spectrum with size 06.
+        assert_eq!(probe.traces[0].request[5], 0x09);
+        let same = report
+            .steps
+            .iter()
+            .find(|s| s.name == "write same value")
+            .unwrap();
+        assert_eq!(same.traces[0].request[5], 0x06);
+        assert_eq!(sim.effect[&(0, LED_LOGO)], [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn unknown_effects_are_not_written() {
+        let mut sim = Sim::new();
+        sim.effect
+            .insert((0, LED_LOGO), [2, 1, 0, 1, 9, 9, 9, 0, 0, 0]);
+        let base = baseline(&mut sim);
+        let logo = Param::Effect {
+            storage: 0,
+            led: LED_LOGO,
+        };
+        let allowed = WriteMode::FirstValidation {
+            allow_source_only: true,
+        };
+        let report = validate(&mut sim, &USB, logo, "ff00ff", &base, allowed);
+        assert!(!report.passed);
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| s.note.contains("cannot be written"))
+        );
+        assert_eq!(sim.effect[&(0, LED_LOGO)][0], 2);
+    }
+
+    #[test]
     fn probes_are_checked() {
         let dpi = Param::Dpi { storage: 0 };
         assert!(dpi.probe("50", &[0x06, 0x40, 0x06, 0x40]).is_err());
@@ -1057,5 +1211,17 @@ mod tests {
         let table = [3, 2, 1, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0];
         assert!(stages.probe("active=2", &table).is_err());
         assert_eq!(stages.probe("active=1", &table).unwrap()[0], 1);
+        let effect = Param::Effect {
+            storage: 1,
+            led: LED_LOGO,
+        };
+        let spectrum = [3, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            effect.probe("#FF00FF", &spectrum).unwrap(),
+            [1, 0, 0, 1, 0xff, 0, 0xff, 0, 0, 0]
+        );
+        assert!(effect.probe("spectrum", &spectrum).is_err());
+        assert!(effect.probe("ff00f", &spectrum).is_err());
+        assert_eq!(effect.write_args(&spectrum), [1, 4, 3, 0, 0, 0]);
     }
 }

@@ -25,7 +25,8 @@ fn cell(s: &str) -> String {
     s.trim().trim_matches('`').to_string()
 }
 
-/// Command table rows keyed by `CC:II`. A row starts with a backticked command.
+/// Command table rows keyed by `CC:II/SS` (command and size): one command
+/// may have several argument layouts. A row starts with a backticked command.
 fn command_rows(markdown: &str) -> BTreeMap<String, Row> {
     let mut rows = BTreeMap::new();
     for line in markdown.lines().filter(|l| l.starts_with("| `")) {
@@ -34,8 +35,10 @@ fn command_rows(markdown: &str) -> BTreeMap<String, Row> {
         if command.len() != 5 || command.as_bytes()[2] != b':' {
             continue;
         }
+        let size = cell(cols[2]);
+        let key = format!("{command}/{size}");
         let row = Row {
-            size: cell(cols[2]),
+            size,
             status: cell(cols[4]),
             sources: cols[5]
                 .split(',')
@@ -44,15 +47,15 @@ fn command_rows(markdown: &str) -> BTreeMap<String, Row> {
                 .collect(),
         };
         assert!(
-            rows.insert(command.clone(), row).is_none(),
-            "{command} documented twice"
+            rows.insert(key.clone(), row).is_none(),
+            "{key} documented twice"
         );
     }
     rows
 }
 
 fn is_read(command: &str) -> bool {
-    u8::from_str_radix(&command[3..], 16).unwrap() & 0x80 != 0
+    u8::from_str_radix(&command[3..5], 16).unwrap() & 0x80 != 0
 }
 
 fn defined_sources() -> Vec<String> {
@@ -68,7 +71,7 @@ fn check(doc: &str, catalog: &[CommandSpec]) {
     let sources = defined_sources();
 
     for spec in catalog {
-        let key = spec.command.to_string();
+        let key = format!("{}/{:02X}", spec.command, spec.command.size);
         let row = rows
             .get(&key)
             .unwrap_or_else(|| panic!("{key} missing from {doc}"));
@@ -85,7 +88,9 @@ fn check(doc: &str, catalog: &[CommandSpec]) {
     for (key, row) in &rows {
         if is_read(key) {
             assert!(
-                catalog.iter().any(|s| s.command.to_string() == *key),
+                catalog
+                    .iter()
+                    .any(|s| format!("{}/{:02X}", s.command, s.command.size) == *key),
                 "{doc} documents read {key} that the code does not have"
             );
         }
