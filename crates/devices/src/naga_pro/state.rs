@@ -18,6 +18,10 @@ use crate::{CommandSpec, ExchangeError, Trace, UsbId, exchange, read_request};
 /// and are not part of the comparable state.
 pub const VOLATILE_PREFIX: &str = "volatile.";
 
+/// Storages whose HyperShift layer (`02:8C` with layer `01`) is read, as
+/// `<storage>.button.NN.hs`. Profiles 2-5 belong to M5.
+pub const HYPERSHIFT_STORAGES: [u8; 2] = [LIVE_STORAGE, 1];
+
 /// Normalized state plus the raw exchanges that produced it.
 #[derive(Debug, Default)]
 pub struct Snapshot {
@@ -258,14 +262,20 @@ fn read_storage<IO: FeatureIo>(r: &mut Reader<'_, IO>, storage: u8) {
     }
 
     for slot in BUTTON_SLOTS {
-        let key = format!("{st}.button.{:02}", slot.id);
-        if let Some(a) = r.read(&key, &BUTTON_FUNCTION, &[storage, slot.id, 0]) {
-            match decode_button_function(&a, storage, slot.id) {
-                Ok(b) => r.set(
-                    &key,
-                    format!("layer={} block={}", b.stored_layer, hex(&b.block)),
-                ),
-                Err(e) => r.set(&key, format!("error: {e}")),
+        let base = format!("{st}.button.{:02}", slot.id);
+        let hypershift = HYPERSHIFT_STORAGES.contains(&storage);
+        for (layer, key) in [(0, base.clone()), (1, format!("{base}.hs"))] {
+            if layer == 1 && !hypershift {
+                continue;
+            }
+            if let Some(a) = r.read(&key, &BUTTON_FUNCTION, &[storage, slot.id, layer]) {
+                match decode_button_function(&a, storage, slot.id) {
+                    Ok(b) => r.set(
+                        &key,
+                        format!("layer={} block={}", b.stored_layer, hex(&b.block)),
+                    ),
+                    Err(e) => r.set(&key, format!("error: {e}")),
+                }
             }
         }
     }

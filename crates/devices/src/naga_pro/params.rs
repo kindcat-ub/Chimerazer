@@ -1350,6 +1350,46 @@ mod tests {
     }
 
     #[test]
+    fn hypershift_changes_fail_validation_hold_and_finish() {
+        // A button write that also changes the HyperShift layer fails the
+        // final snapshot even though the layer-0 read-back matches.
+        let mut sim = Sim::new();
+        sim.button_write_hits_hypershift = true;
+        let base = baseline(&mut sim);
+        assert!(base.contains_key("p1.button.80.hs"));
+        assert!(base.contains_key("live.button.80.hs"));
+        assert!(!base.contains_key("p2.button.80.hs"));
+        let side1 = Param::button(0, 80).unwrap();
+        let report = validate(&mut sim, &USB, side1, "key:f5", &base, FIRST);
+        assert!(!report.passed, "{:#?}", report.steps);
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| s.name == "final snapshot" && !s.ok)
+        );
+
+        // hold refuses a baseline whose HyperShift values differ.
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        sim.hypershift.insert((1, 64), [0; 7]);
+        let p1 = Param::button(1, 80).unwrap();
+        let (report, held) = hold(&mut sim, &USB, &[(p1, "key:f5")], &base, FIRST);
+        assert!(!report.passed && held.is_none());
+
+        // finish fails when a HyperShift value changed across the reconnect,
+        // although every layer-0 probe survived and was restored.
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        let (report, held) = hold(&mut sim, &USB, &[(p1, "key:f5")], &base, FIRST);
+        assert!(report.passed, "{:#?}", report.steps);
+        sim.hypershift.insert((1, 80), [0; 7]);
+        let report = finish_hold(&mut sim, &USB, &held.unwrap(), &base, FIRST);
+        assert_eq!(persisted(&report), Some(true));
+        assert!(!report.passed, "{:#?}", report.steps);
+    }
+
+    #[test]
     fn probes_are_checked() {
         let dpi = Param::Dpi { storage: 0 };
         assert!(dpi.probe("50", &[0x06, 0x40, 0x06, 0x40]).is_err());

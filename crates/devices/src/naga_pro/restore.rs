@@ -555,12 +555,13 @@ mod tests {
                 .iter()
                 .any(|(k, _, _)| k == "p1.button.80")
         );
-        // Profile 1 and live bindings are covered; profiles 2-5 are not.
-        assert!(
-            !r.not_restorable
-                .iter()
-                .any(|k| k.starts_with("p1.button.") || k.starts_with("live.button."))
-        );
+        // Profile 1 and live layer-0 bindings are covered; profiles 2-5
+        // and the HyperShift layer are not.
+        let covered = |k: &String| {
+            (k.starts_with("p1.button.") || k.starts_with("live.button.")) && !k.ends_with(".hs")
+        };
+        assert!(!r.not_restorable.iter().any(covered));
+        assert!(r.not_restorable.contains(&"p1.button.80.hs".to_string()));
         assert!(r.not_restorable.contains(&"p2.button.80".to_string()));
     }
 

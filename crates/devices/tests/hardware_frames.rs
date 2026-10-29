@@ -271,8 +271,14 @@ fn snapshot_of_replayed_unit() {
     assert_eq!(v["p1.dpi"], "error: NotSupported");
     assert!(!v.keys().any(|k| k.contains("serial")));
 
-    let live_buttons = v.keys().filter(|k| k.starts_with("live.button.")).count();
+    let live_buttons = v
+        .keys()
+        .filter(|k| k.starts_with("live.button.") && !k.ends_with(".hs"))
+        .count();
     assert_eq!(live_buttons, naga_pro::BUTTON_SLOTS.len());
+    // The HyperShift layer was not captured in these frames.
+    assert_eq!(v["live.button.01.hs"], "error: NotSupported");
+    assert!(!v.contains_key("p2.button.01.hs"));
 
     // The text form parses back to the same values.
     assert_eq!(naga_pro::state::parse_text(&snap.to_text()), *v);

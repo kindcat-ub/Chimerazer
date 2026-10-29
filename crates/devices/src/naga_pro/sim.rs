@@ -27,8 +27,12 @@ pub struct Sim {
     pub brightness: HashMap<(u8, u8), u8>,
     /// `0F:82` effect bytes (`args[2..12]`) by storage and LED.
     pub effect: HashMap<(u8, u8), [u8; 10]>,
-    /// `02:8C` stored flag and block by storage and slot.
+    /// `02:8C` stored flag and block of layer 0 by storage and slot.
     pub buttons: HashMap<(u8, u8), (u8, [u8; 7])>,
+    /// The HyperShift layer (`02:8C` with layer 1) by storage and slot.
+    pub hypershift: HashMap<(u8, u8), [u8; 7]>,
+    /// A layer-0 button write also changes the HyperShift block.
+    pub button_write_hits_hypershift: bool,
     pub poll: u8,
     pub ignore_writes: bool,
     /// A write to DPI also changes brightness on storage 0, LED 1.
@@ -62,6 +66,8 @@ impl Sim {
             for slot in BUTTON_SLOTS {
                 let block = [0x02, 0x02, 0, 0x1E, 0, 0, 0];
                 s.buttons.insert((st, slot.id), (1, block));
+                s.hypershift
+                    .insert((st, slot.id), [0x02, 0x02, 0, 0x1F, 0, 0, 0]);
             }
         }
         s
@@ -92,8 +98,15 @@ impl FeatureIo for Sim {
                     self.brightness.insert((a[0], a[1]), a[2]);
                 }
                 (0x02, 0x0C) => {
-                    let entry = self.buttons.get_mut(&(a[0], a[1])).unwrap();
-                    entry.1.copy_from_slice(&a[3..10]);
+                    let block: [u8; 7] = a[3..10].try_into().unwrap();
+                    if a[2] == 1 {
+                        self.hypershift.insert((a[0], a[1]), block);
+                    } else {
+                        self.buttons.get_mut(&(a[0], a[1])).unwrap().1 = block;
+                        if self.button_write_hits_hypershift {
+                            self.hypershift.insert((a[0], a[1]), [0; 7]);
+                        }
+                    }
                 }
                 (0x0F, 0x02) => {
                     let mut e = [0; 10];
@@ -116,7 +129,11 @@ impl FeatureIo for Sim {
                 (0x02, 0x8C) => {
                     let (flag, block) = self.buttons[&(a[0], a[1])];
                     args[2] = flag;
-                    args[3..10].copy_from_slice(&block);
+                    if a[2] == 1 {
+                        args[3..10].copy_from_slice(&self.hypershift[&(a[0], a[1])]);
+                    } else {
+                        args[3..10].copy_from_slice(&block);
+                    }
                 }
                 (0x0F, 0x82) => args[2..12].copy_from_slice(&self.effect[&(a[0], a[1])]),
                 (0x02, 0x84) => {
