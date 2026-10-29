@@ -4,6 +4,8 @@
 //! OpenRazer; see `docs/protocol/naga-pro.md` for the provenance of every
 //! command.
 
+pub mod state;
+
 use std::fmt;
 use std::time::Duration;
 

@@ -203,3 +203,69 @@ fn captured_commands_are_our_hardware() {
         );
     }
 }
+
+/// Replays our unit's wired frames; requests without a captured answer get
+/// a NotSupported reply, the way an unknown command would.
+struct Replay {
+    answers: BTreeMap<Vec<u8>, Vec<u8>>,
+    pending: Option<Vec<u8>>,
+}
+
+impl chimerazer_transport::FeatureIo for Replay {
+    fn send_feature(&mut self, report: &[u8]) -> std::io::Result<()> {
+        self.pending = Some(report.to_vec());
+        Ok(())
+    }
+
+    fn get_feature(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let request = self.pending.clone().unwrap();
+        let reply = self.answers.get(&request).cloned().unwrap_or_else(|| {
+            let mut r = request.clone();
+            r[0] = 0x05;
+            r
+        });
+        buf[..REPORT_LEN].copy_from_slice(&reply);
+        Ok(REPORT_LEN)
+    }
+}
+
+#[test]
+fn snapshot_of_replayed_unit() {
+    let answers = frames()
+        .into_iter()
+        .filter(|f| f.product_id == 0x008F)
+        .map(|f| (f.request, f.response))
+        .collect();
+    let mut io = Replay {
+        answers,
+        pending: None,
+    };
+    let usb = naga_pro::usb_id(0x008F).unwrap();
+    let snap = naga_pro::state::read_snapshot(&mut io, usb);
+    let v = &snap.values;
+
+    assert_eq!(v["device.firmware"], "2.03");
+    assert_eq!(v["device.mode"], "00 00");
+    assert_eq!(v["device.poll_rate"], "1000 Hz");
+    assert_eq!(v["power.idle_seconds"], "300");
+    assert_eq!(v["volatile.charging"], "true");
+    assert_eq!(v["profiles.assigned"], "1 2 3 4");
+    assert_eq!(v["profiles.active"], "1");
+    assert_eq!(v["live.dpi"], "1600x1600");
+    assert_eq!(
+        v["live.dpi_stages"],
+        "active=3 1:400x400 2:800x800 3:1600x1600 4:3200x3200 5:6400x6400"
+    );
+    assert_eq!(v["live.led.logo.brightness"], "51");
+    assert_eq!(v["live.button.01"], "layer=1 block=01 01 01 00 00 00 00");
+    // Stored profile banks were never captured: recorded as errors, not
+    // silently dropped.
+    assert_eq!(v["p1.dpi"], "error: NotSupported");
+    assert!(!v.keys().any(|k| k.contains("serial")));
+
+    let live_buttons = v.keys().filter(|k| k.starts_with("live.button.")).count();
+    assert_eq!(live_buttons, naga_pro::BUTTON_SLOTS.len());
+
+    // The text form parses back to the same values.
+    assert_eq!(naga_pro::state::parse_text(&snap.to_text()), *v);
+}
