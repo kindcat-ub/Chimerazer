@@ -22,7 +22,7 @@ usage:
                       [--led scroll_wheel|logo] [--slot N] [--pid PID] [--log FILE]
                       [--allow-source-only]
   chimerazer hold ITEM.. --baseline DUMP --state FILE [--pid PID] [--log FILE]
-  chimerazer finish <STATE> --baseline DUMP [--log FILE]
+  chimerazer finish <STATE> --baseline DUMP [--pid PID] [--log FILE]
   chimerazer restore <DUMP> [--dry-run] [--pid PID] [--log FILE]
   chimerazer set ITEM.. [--pid PID]
   chimerazer buttons <DUMP> [--storage N]
@@ -435,11 +435,16 @@ fn load_baseline(
 
 fn finish(args: &[String]) -> Result<(), String> {
     let (state_path, rest) = args.split_first().ok_or(USAGE)?;
-    let (mut baseline_path, mut log) = (None, None);
+    let (mut baseline_path, mut log, mut pid_override) = (None, None, None);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
+            "--pid" => {
+                let v = value()?;
+                pid_override =
+                    Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
             "--baseline" => baseline_path = Some(value()?.clone()),
             "--log" => log = Some(value()?.clone()),
             other => return Err(format!("unexpected argument {other}\n{USAGE}")),
@@ -471,7 +476,11 @@ fn finish(args: &[String]) -> Result<(), String> {
     }
     let allow_source_only = field("allow_source_only")? == "true";
 
-    let (hid, model, usb) = select(Some(pid))?;
+    // The same unit may be finished over its other link (`--pid`).
+    let (hid, model, usb) = select(Some(pid_override.unwrap_or(pid)))?;
+    if lookup(pid).map(|(m, _)| m) != Some(model) {
+        return Err(format!("{state_path} was written for another model"));
+    }
     let baseline = load_baseline(&baseline_path, model)?;
     let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
     let mode = chimerazer_devices::WriteMode::FirstValidation { allow_source_only };
