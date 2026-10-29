@@ -12,10 +12,11 @@ use chimerazer_transport::{HidInterface, Hidraw, enumerate};
 const USAGE: &str = "\
 usage:
   chimerazer list
-  chimerazer read <CC:II> [ARG..] [--pid 008f|0090]
+  chimerazer read <CC:II> [ARG..] [--pid 008f|0090] [--txn XX]
 
   read   sends one catalogued read command; ARG are hex bytes
-         (e.g. `chimerazer read 04:85 00`). Prints raw frames.";
+         (e.g. `chimerazer read 04:85 00`). Prints raw frames.
+         --txn overrides the product's transaction ID (protocol research).";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -83,10 +84,14 @@ fn read(args: &[String]) -> Result<(), String> {
     let (cmd, rest) = args.split_first().ok_or(USAGE)?;
     let spec = parse_command(cmd)?;
     let mut pid = None;
+    let mut txn = None;
     let mut bytes = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
-        if a == "--pid" {
+        if a == "--txn" {
+            let v = it.next().ok_or("--txn needs a value")?;
+            txn = Some(u8::from_str_radix(v, 16).map_err(|_| format!("bad txn {v}"))?);
+        } else if a == "--pid" {
             let v = it.next().ok_or("--pid needs a value")?;
             pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
         } else {
@@ -115,6 +120,10 @@ fn read(args: &[String]) -> Result<(), String> {
         }
     };
 
+    let usb = &UsbId {
+        transaction_id: txn.unwrap_or(usb.transaction_id),
+        ..*usb
+    };
     let request = read_request(usb, spec, &bytes).map_err(|e| e.to_string())?;
     let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
 
