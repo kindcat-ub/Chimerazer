@@ -33,6 +33,10 @@ pub struct Sim {
     pub hypershift: HashMap<(u8, u8), [u8; 7]>,
     /// A layer-0 button write also changes the HyperShift block.
     pub button_write_hits_hypershift: bool,
+    /// Layer-1 writes report success but leave the flag and block unchanged.
+    pub ignore_hypershift_writes: bool,
+    /// Layer-1 reads fail (used to check that preservation is prepared first).
+    pub reject_hypershift_reads: bool,
     pub poll: u8,
     pub ignore_writes: bool,
     /// A write to DPI also changes brightness on storage 0, LED 1.
@@ -98,6 +102,12 @@ impl FeatureIo for Sim {
                     self.brightness.insert((a[0], a[1]), a[2]);
                 }
                 (0x02, 0x0C) => {
+                    if a[2] == 1 && self.ignore_hypershift_writes {
+                        out[0] = Status::Ok.to_byte();
+                        out[88] = crc(&out);
+                        self.reply = Some(out);
+                        return Ok(());
+                    }
                     let block: [u8; 7] = a[3..10].try_into().unwrap();
                     // As on our unit: the write's layer byte becomes the
                     // slot's stored flag, whichever layer it addresses.
@@ -150,7 +160,9 @@ impl FeatureIo for Sim {
                 _ => {}
             }
         }
-        out[0] = if write && self.nack_applied_writes {
+        out[0] = if (write && self.nack_applied_writes)
+            || (!write && class == 2 && id == 0x8c && a[2] == 1 && self.reject_hypershift_reads)
+        {
             Status::Failed.to_byte()
         } else {
             Status::Ok.to_byte()

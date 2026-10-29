@@ -14,9 +14,7 @@ use chimerazer_transport::FeatureIo;
 use super::binding::Binding;
 use super::state::{compare, read_snapshot};
 use super::*;
-use crate::{
-    CommandSpec, ExchangeError, Trace, UsbId, WriteMode, exchange, read_request, write_request,
-};
+use crate::{CommandSpec, Trace, UsbId, WriteMode, exchange, read_request, write_request};
 
 /// One writable value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -537,19 +535,123 @@ struct Runner<'a, IO> {
     wrote: bool,
 }
 
-enum WriteError {
+pub(crate) enum WriteError {
     /// The write gate refused; no frame was sent.
     Refused(String),
     /// A frame was sent and the exchange reported an error.
     Reported(String),
+    /// A frame was sent, but the button flag or HyperShift block was not preserved.
+    Preservation(String),
 }
 
 impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Refused(e) | Self::Reported(e) => f.write_str(e),
+            Self::Refused(e) | Self::Reported(e) | Self::Preservation(e) => f.write_str(e),
         }
     }
+}
+
+/// Shared write path for validation and normal operations. A layer-0 write
+/// changes the slot flag to zero; replaying the unchanged HyperShift block
+/// restores flag one without replacing the user's HyperShift assignment.
+pub(crate) fn write_value(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    param: Param,
+    value: &[u8],
+    mode: WriteMode,
+    traces: &mut Vec<Trace>,
+    wrote: &mut bool,
+) -> Result<(), WriteError> {
+    let spec = param
+        .write_spec_for(value)
+        .ok_or_else(|| WriteError::Refused(format!("{param}: value cannot be written")))?;
+    let request = write_request(usb, spec, param.read_spec(), &param.write_args(value), mode)
+        .map_err(|e| WriteError::Refused(e.to_string()))?;
+    let saved = if let Param::Button {
+        storage,
+        slot,
+        layer: 0,
+    } = param
+    {
+        let (flag, _) = read_button(io, usb, param, traces).map_err(WriteError::Refused)?;
+        match flag {
+            0 => Some((flag, None)),
+            1 => {
+                let hs = Param::Button {
+                    storage,
+                    slot,
+                    layer: 1,
+                };
+                let (hs_flag, block) =
+                    read_button(io, usb, hs, traces).map_err(WriteError::Refused)?;
+                if hs_flag != flag {
+                    return Err(WriteError::Refused(
+                        "button flags disagree between layers".into(),
+                    ));
+                }
+                let repair = write_request(usb, spec, hs.read_spec(), &hs.write_args(&block), mode)
+                    .map_err(|e| WriteError::Refused(e.to_string()))?;
+                Some((flag, Some((hs, block, repair))))
+            }
+            _ => {
+                return Err(WriteError::Refused(format!(
+                    "unknown button flag {flag:#04x}"
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    *wrote = true;
+    let (trace, result) = exchange(io, usb, &request);
+    traces.push(trace);
+    let mut notes = Vec::new();
+    if let Err(e) = result {
+        notes.push(e.to_string());
+    }
+    if let Some((flag, repair)) = saved {
+        if let Some((hs, block, request)) = repair {
+            // Attempt preservation even if the primary write reported an error.
+            let (trace, result) = exchange(io, usb, &request);
+            traces.push(trace);
+            if let Err(e) = result {
+                notes.push(format!("HyperShift replay: {e}"));
+            }
+            let (after_flag, after_block) =
+                read_button(io, usb, hs, traces).map_err(WriteError::Preservation)?;
+            if after_flag != flag || after_block != block {
+                return Err(WriteError::Preservation(
+                    "HyperShift block or flag differs".into(),
+                ));
+            }
+        }
+        let (after_flag, _) =
+            read_button(io, usb, param, traces).map_err(WriteError::Preservation)?;
+        if after_flag != flag {
+            return Err(WriteError::Preservation("layer-0 flag differs".into()));
+        }
+    }
+    if notes.is_empty() {
+        Ok(())
+    } else {
+        Err(WriteError::Reported(notes.join("; ")))
+    }
+}
+
+fn read_button(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    param: Param,
+    traces: &mut Vec<Trace>,
+) -> Result<(u8, Vec<u8>), String> {
+    let request =
+        read_request(usb, param.read_spec(), &param.read_args()).map_err(|e| e.to_string())?;
+    let (trace, result) = exchange(io, usb, &request);
+    traces.push(trace);
+    let response = result.map_err(|e| e.to_string())?;
+    Ok((response.args[2], param.extract(&response.args)?))
 }
 
 impl<IO: FeatureIo> Runner<'_, IO> {
@@ -563,28 +665,16 @@ impl<IO: FeatureIo> Runner<'_, IO> {
         self.param.extract(&response.args)
     }
 
-    /// Sends one write. `Err(Refused)` means nothing was sent; any other
-    /// error happened on the wire and says nothing about the device state.
     fn write(&mut self, value: &[u8], traces: &mut Vec<Trace>) -> Result<(), WriteError> {
-        let spec = self.param.write_spec_for(value).ok_or_else(|| {
-            WriteError::Refused(format!("{}: value cannot be written", self.param))
-        })?;
-        let request = write_request(
+        write_value(
+            self.io,
             self.usb,
-            spec,
-            self.param.read_spec(),
-            &self.param.write_args(value),
+            self.param,
+            value,
             self.mode,
+            traces,
+            &mut self.wrote,
         )
-        .map_err(|e| WriteError::Refused(e.to_string()))?;
-        self.wrote = true;
-        let (trace, result) = exchange(self.io, self.usb, &request);
-        traces.push(trace);
-        match result {
-            Ok(_) => Ok(()),
-            Err(ExchangeError::Device(s)) => Err(WriteError::Reported(format!("{s:?}"))),
-            Err(e) => Err(WriteError::Reported(e.to_string())),
-        }
     }
 
     /// Writes `value`, reads it back and records the step. The read-back
@@ -606,6 +696,11 @@ impl<IO: FeatureIo> Runner<'_, IO> {
         }
         let read = self.read(&mut traces);
         let (ok, got, note) = match (&written, &read) {
+            (Err(WriteError::Preservation(e)), got) => (
+                false,
+                got.as_ref().ok().map(|v| self.param.render(v)),
+                format!("button preservation failed: {e}"),
+            ),
             (_, Err(r)) => (false, None, format!("read-back failed: {r}")),
             (Ok(()), Ok(v)) if v == value => (true, Some(self.param.render(v)), String::new()),
             (Err(w), Ok(v)) if v == value => (
@@ -1376,7 +1471,12 @@ mod tests {
             .unwrap();
         assert_eq!(probe.got.as_deref(), Some("key:ctrl+f5"));
         assert_eq!(
-            &probe.traces[0].request[8..18],
+            &probe
+                .traces
+                .iter()
+                .find(|t| t.request[7] == 0x0c)
+                .unwrap()
+                .request[8..18],
             &[0, 80, 0, 0x02, 0x02, 0x01, 0x3E, 0, 0, 0]
         );
         assert_eq!(sim.buttons[&(0, 80)].1, [0x02, 0x02, 0, 0x1E, 0, 0, 0]);
@@ -1426,29 +1526,88 @@ mod tests {
         assert!(!report.passed, "{:#?}", report.steps);
     }
 
-    /// On our unit a layer-0 write reset the stored flag (`args[2]`) from 1
-    /// to 0; the block read-back still matches, so only the final snapshot
-    /// can see it.
     #[test]
-    fn stored_flag_reset_fails_the_final_snapshot() {
-        let mut sim = Sim::new();
-        sim.buttons.get_mut(&(0, 64)).unwrap().0 = 1;
-        let base = baseline(&mut sim);
-        let p = Param::button(0, 64).unwrap();
-        let report = validate(&mut sim, &USB, p, "key:q", &base, FIRST);
-        assert!(!report.passed);
-        let last = report.steps.last().unwrap();
-        assert_eq!(last.name, "final snapshot");
-        assert!(
-            !last.ok && last.note.contains("live.button.64"),
-            "{}",
-            last.note
-        );
+    fn stored_flag_and_hypershift_survive_validation() {
+        for storage in [0, 1] {
+            let mut sim = Sim::new();
+            sim.buttons.get_mut(&(storage, 64)).unwrap().0 = 1;
+            let base = baseline(&mut sim);
+            let p = Param::button(storage, 64).unwrap();
+            let report = validate(&mut sim, &USB, p, "key:q", &base, FIRST);
+            assert!(report.passed, "{:#?}", report.steps);
+            assert_eq!(sim.buttons[&(storage, 64)].0, 1);
+            assert_eq!(baseline(&mut sim), base);
+        }
         // HyperShift-layer writes are never allowed in normal mode.
         let hs = Param::button_layer(1, 64, 1).unwrap();
         assert_eq!(hs.dump_key(), "p1.button.64.hs");
         assert!(!hs.verified_on(crate::Link::Wired));
         assert!(Param::button_layer(1, 64, 2).is_err());
+    }
+
+    #[test]
+    fn all_button_flags_survive_hold_and_finish_over_the_other_link() {
+        for storage in [0, 1] {
+            let mut sim = Sim::new();
+            for (i, slot) in BUTTON_SLOTS.iter().enumerate() {
+                sim.buttons.get_mut(&(storage, slot.id)).unwrap().0 = (i % 2) as u8;
+            }
+            let base = baseline(&mut sim);
+            let hs = sim.hypershift.clone();
+            let items: Vec<_> = BUTTON_SLOTS
+                .iter()
+                .map(|slot| (Param::button(storage, slot.id).unwrap(), "key:q"))
+                .collect();
+            let (report, held) = hold(&mut sim, &USB, &items, &base, FIRST);
+            assert!(report.passed, "{:#?}", report.steps);
+            for (i, slot) in BUTTON_SLOTS.iter().enumerate() {
+                assert_eq!(sim.buttons[&(storage, slot.id)].0, (i % 2) as u8);
+            }
+            assert_eq!(sim.hypershift, hs);
+            let receiver = UsbId {
+                product_id: 0x0090,
+                link: crate::Link::Receiver,
+                ..USB
+            };
+            let report = finish_hold(&mut sim, &receiver, &held.unwrap(), &base, FIRST);
+            assert!(report.passed, "{:#?}", report.steps);
+            assert_eq!(baseline(&mut sim), base);
+        }
+    }
+
+    #[test]
+    fn applied_button_writes_with_error_status_preserve_the_flag() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 64)).unwrap().0 = 1;
+        sim.nack_applied_writes = true;
+        let base = baseline(&mut sim);
+        let p = Param::button(1, 64).unwrap();
+        let report = validate(&mut sim, &USB, p, "key:q", &base, FIRST);
+        assert!(report.passed, "{:#?}", report.steps);
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| s.note.contains("HyperShift replay"))
+        );
+        assert_eq!(baseline(&mut sim), base);
+    }
+
+    #[test]
+    fn ignored_flag_replay_fails_even_when_the_binding_matches() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 64)).unwrap().0 = 1;
+        sim.ignore_hypershift_writes = true;
+        let base = baseline(&mut sim);
+        let p = Param::button(1, 64).unwrap();
+        let report = validate(&mut sim, &USB, p, "key:q", &base, FIRST);
+        assert!(!report.passed);
+        assert!(
+            report
+                .steps
+                .iter()
+                .any(|s| !s.ok && s.note.contains("preservation failed"))
+        );
     }
 
     #[test]

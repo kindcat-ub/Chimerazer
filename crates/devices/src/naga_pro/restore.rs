@@ -12,10 +12,10 @@ use std::fmt;
 
 use chimerazer_transport::FeatureIo;
 
-use super::params::Param;
+use super::params::{Param, WriteError, write_value};
 use super::state::{VOLATILE_PREFIX, compare, read_snapshot};
 use super::*;
-use crate::{ExchangeError, Trace, UsbId, WriteMode, exchange, read_request, write_request};
+use crate::{Trace, UsbId, WriteMode, exchange, read_request};
 
 /// Values restore can write, profile storage first: the live layer of the
 /// active profile follows the profile, so it is usually unchanged by then.
@@ -174,29 +174,19 @@ fn write_verified(
     entry: &mut Entry,
     mode: WriteMode,
 ) {
-    let Some(spec) = param.write_spec_for(value) else {
-        entry.outcome = Outcome::Failed("value cannot be written, nothing sent".into());
+    let mut wrote = false;
+    let written = write_value(io, usb, param, value, mode, &mut entry.traces, &mut wrote);
+    if let Err(WriteError::Refused(e)) = written {
+        entry.outcome = Outcome::Failed(format!("write refused, nothing sent: {e}"));
         return;
-    };
-    let written = match write_request(usb, spec, param.read_spec(), &param.write_args(value), mode)
-    {
-        Ok(request) => {
-            let (trace, result) = exchange(io, usb, &request);
-            entry.traces.push(trace);
-            result.map(|_| ()).map_err(|e| match e {
-                ExchangeError::Device(s) => format!("device reported {s:?}"),
-                other => other.to_string(),
-            })
-        }
-        Err(e) => {
-            entry.outcome = Outcome::Failed(format!("write refused, nothing sent: {e}"));
-            return;
-        }
-    };
+    }
     match read_value(io, usb, param, &mut entry.traces) {
         Ok(after) => {
             entry.after = Some(param.render(&after));
             entry.outcome = match (after == value, written) {
+                (_, Err(WriteError::Preservation(e))) => {
+                    Outcome::Failed(format!("button preservation failed: {e}"))
+                }
                 (true, Ok(())) => Outcome::Restored {
                     note: String::new(),
                 },
@@ -572,6 +562,8 @@ mod tests {
     #[test]
     fn buttons_are_covered_and_skipped_until_verified() {
         let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 80)).unwrap().0 = 1;
+        sim.buttons.get_mut(&(0, 80)).unwrap().0 = 1;
         let dump = read_snapshot(&mut sim, &WIRED).values;
         sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
         let r = restore(&mut sim, &WIRED, &dump, false);
@@ -598,6 +590,9 @@ mod tests {
     #[test]
     fn button_bindings_are_restored_from_a_dump() {
         let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 80)).unwrap().0 = 1;
+        sim.buttons.get_mut(&(0, 80)).unwrap().0 = 1;
+        let hs = sim.hypershift.clone();
         let dump = read_snapshot(&mut sim, &WIRED).values;
         sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
         sim.buttons.get_mut(&(1, 85)).unwrap().1 = [0x0D, 0x04, 0, 0x52, 0, 0x37, 0];
@@ -618,6 +613,9 @@ mod tests {
             );
         }
         assert_eq!(*outcome(&r, "p1.button.64"), Outcome::Unchanged);
+        assert_eq!(sim.buttons[&(1, 80)].0, 1);
+        assert_eq!(sim.buttons[&(0, 80)].0, 1);
+        assert_eq!(sim.hypershift, hs);
         assert_eq!(sim.buttons[&(1, 85)].1, [0x02, 0x02, 0, 0x1E, 0, 0, 0]);
         assert!(r.remaining.is_empty(), "{:?}", r.remaining);
     }
@@ -631,6 +629,51 @@ mod tests {
         assert_eq!(e.traces[1].request[8..11], [1, 64, 1]);
         // In the simulator, as on our unit, the layer byte becomes the flag.
         assert_eq!(sim.buttons[&(1, 64)].0, 1);
+    }
+
+    #[test]
+    fn button_rewrite_preserves_flags_and_checks_prerequisites() {
+        for flag in [0, 1, 2] {
+            let mut sim = Sim::new();
+            sim.buttons.get_mut(&(1, 64)).unwrap().0 = flag;
+            let before = sim.buttons.clone();
+            let hs = sim.hypershift.clone();
+            let e = rewrite(&mut sim, &WIRED, Param::button(1, 64).unwrap());
+            assert_eq!(
+                matches!(e.outcome, Outcome::Restored { .. }),
+                flag <= 1,
+                "{e:?}"
+            );
+            assert_eq!(sim.buttons, before);
+            assert_eq!(sim.hypershift, hs);
+            let writes = e.traces.iter().filter(|t| t.request[7] == 0x0c).count();
+            assert_eq!(
+                writes,
+                match flag {
+                    0 => 1,
+                    1 => 2,
+                    _ => 0,
+                }
+            );
+        }
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 64)).unwrap().0 = 1;
+        sim.reject_hypershift_reads = true;
+        let e = rewrite(&mut sim, &WIRED, Param::button(1, 64).unwrap());
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        assert_eq!(sim.buttons[&(1, 64)].0, 1);
+    }
+
+    #[test]
+    fn button_rewrite_cannot_hide_a_failed_flag_replay() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 64)).unwrap().0 = 1;
+        sim.ignore_hypershift_writes = true;
+        let e = rewrite(&mut sim, &WIRED, Param::button(1, 64).unwrap());
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert_eq!(e.before, e.after);
+        assert_eq!(sim.buttons[&(1, 64)].0, 0);
     }
 
     #[test]
