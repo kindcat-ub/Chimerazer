@@ -51,7 +51,7 @@ fn frames() -> Vec<Frame> {
 #[test]
 fn requests_reencode_and_responses_validate() {
     let frames = frames();
-    assert_eq!(frames.len(), 16);
+    assert_eq!(frames.len(), 98);
     for f in &frames {
         assert_eq!(f.request.len(), REPORT_LEN);
         let usb = naga_pro::usb_id(f.product_id).unwrap();
@@ -74,12 +74,17 @@ fn requests_reencode_and_responses_validate() {
 }
 
 /// Normalized state: the response arguments are identical over the wire and
-/// through the receiver.
+/// through the receiver, except battery level and charging, which depend on
+/// the cable being plugged in.
 #[test]
 fn wired_and_receiver_state_match() {
+    const LINK_DEPENDENT: [&str; 2] = ["07:80", "07:84"];
     let mut wired: BTreeMap<(String, Vec<u8>), [u8; ARGS_LEN]> = BTreeMap::new();
     let mut receiver = wired.clone();
     for f in frames() {
+        if LINK_DEPENDENT.contains(&f.command.as_str()) {
+            continue;
+        }
         let args = Response::parse(&f.response).unwrap().args;
         let map = if f.product_id == 0x008F {
             &mut wired
@@ -88,7 +93,7 @@ fn wired_and_receiver_state_match() {
         };
         map.insert((f.command, f.request), args);
     }
-    assert_eq!(wired.len(), 8);
+    assert_eq!(wired.len(), 47);
     assert_eq!(wired, receiver);
 }
 
@@ -140,12 +145,41 @@ fn decoded_values_of_our_unit() {
     );
     assert_eq!(state["05:80 00"][0], 4);
     assert_eq!(state["05:84 00"][0], 1);
+    assert_eq!(&state["00:81 00"][..2], &[0x02, 0x03]); // firmware 2.03
+    assert_eq!(&state["00:84 00"][..2], &[0x00, 0x00]); // hardware mode
+    assert_eq!(state["00:85 00"][0], 0x01); // 1000 Hz
+    assert_eq!(&state["07:83 00"][..2], &[0x01, 0x2C]); // 300 s idle
+    assert_eq!(state["07:84 00"][1], 0x01); // charging on the cable
+    for key in ["0F:82 01", "0F:82 04"] {
+        assert_eq!(state[key][2], 0x03, "{key}: effect");
+    }
     let slots = ButtonInventory::decode(&state["02:84 00"]).unwrap().slots;
     let mut table: Vec<u8> = naga_pro::BUTTON_SLOTS.iter().map(|s| s.id).collect();
     let mut reported = slots.clone();
     table.sort_unstable();
     reported.sort_unstable();
     assert_eq!(reported, table);
+}
+
+/// Every button slot reads back with a well-formed echo on both links.
+#[test]
+fn all_button_slots_decode() {
+    for link in [0x008F, 0x0090] {
+        let mut slots: Vec<u8> = frames()
+            .into_iter()
+            .filter(|f| f.product_id == link && f.command == "02:8C")
+            .map(|f| {
+                let (storage, slot) = (f.request[8], f.request[9]);
+                let args = Response::parse(&f.response).unwrap().args;
+                naga_pro::decode_button_function(&args, storage, slot).unwrap();
+                slot
+            })
+            .collect();
+        let mut table: Vec<u8> = naga_pro::BUTTON_SLOTS.iter().map(|s| s.id).collect();
+        slots.sort_unstable();
+        table.sort_unstable();
+        assert_eq!(slots, table, "{link:04x}");
+    }
 }
 
 /// Commands with captured frames are marked as verified on our hardware.

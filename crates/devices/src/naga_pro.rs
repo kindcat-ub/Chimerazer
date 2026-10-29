@@ -113,36 +113,52 @@ pub const BUTTON_SLOTS: [ButtonSlot; 30] = {
 pub const FIRMWARE_VERSION: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x81, 0x02),
     name: "firmware version",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-common"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-common",
+    ],
 };
 
 pub const SERIAL: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x82, 0x16),
     name: "serial number",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-common"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-common",
+    ],
 };
 
 pub const DEVICE_MODE: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x84, 0x02),
     name: "device mode",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-common"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-common",
+    ],
 };
 
 pub const POLL_RATE: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x85, 0x01),
     name: "poll rate",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const PROFILE_SUMMARY: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x87, 0x00),
     name: "onboard profile summary",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const BUTTON_INVENTORY: CommandSpec = CommandSpec {
@@ -155,8 +171,9 @@ pub const BUTTON_INVENTORY: CommandSpec = CommandSpec {
 pub const BUTTON_FUNCTION: CommandSpec = CommandSpec {
     command: Command::new(0x02, 0x8C, 0x0A),
     name: "button function",
-    confirmation: Confirmation::ExternalHardware,
+    confirmation: Confirmation::OurHardware,
     sources: &[
+        "chimerazer-m1-reads",
         "opensnek-naga-default-banks",
         "opensnek-naga-button-encoding",
     ],
@@ -215,36 +232,52 @@ pub const PROFILE_METADATA: CommandSpec = CommandSpec {
 pub const BATTERY_LEVEL: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x80, 0x02),
     name: "battery level",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const LOW_BATTERY_THRESHOLD: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x81, 0x01),
     name: "low battery threshold",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const IDLE_TIME: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x83, 0x02),
     name: "idle time",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const CHARGING: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x84, 0x02),
     name: "charging status",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const LED_EFFECT: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x82, 0x0C),
     name: "LED effect state",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-crud-spec"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-crud-spec"],
 };
 
 pub const LED_BRIGHTNESS: CommandSpec = CommandSpec {
