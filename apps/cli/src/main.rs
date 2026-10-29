@@ -20,7 +20,8 @@ usage:
   chimerazer diff <FILE> <FILE>
   chimerazer validate <PARAM> --probe VALUE --baseline DUMP [--storage N]
                       [--led scroll_wheel|logo] [--pid PID] [--log FILE]
-                      [--allow-source-only] [--hold STATE]
+                      [--allow-source-only]
+  chimerazer hold ITEM.. --baseline DUMP --state FILE [--pid PID] [--log FILE]
   chimerazer finish <STATE> --baseline DUMP [--log FILE]
 
   read   sends one catalogued read command; ARG are hex bytes
@@ -34,9 +35,11 @@ usage:
          read errors and matches the device. Writes the same value, the
          probe and the original back, reading after each write, then checks
          the whole device against DUMP. --log writes the protocol (markdown).
-         --hold: persistence check; write the probe, leave it in place and
-         save STATE. Reconnect the mouse, then `finish` reads what survived,
-         restores the original and checks the whole device against DUMP.";
+  hold   persistence check for several values with one reconnect. ITEM is
+         dpi:<storage>:<probe>, dpi-stages:<storage>:active=<id> or
+         brightness:<storage>:<logo|scroll_wheel>:<probe>. Writes each probe
+         and leaves it in place; `finish` reads what survived the reconnect,
+         restores the originals and checks the whole device against DUMP.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,6 +49,7 @@ fn main() -> ExitCode {
         Some("dump") => dump(&args[1..]),
         Some("diff") => diff(&args[1..]),
         Some("validate") => validate(&args[1..]),
+        Some("hold") => hold(&args[1..]),
         Some("finish") => finish(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
@@ -184,7 +188,6 @@ fn validate(args: &[String]) -> Result<(), String> {
 
     let (name, rest) = args.split_first().ok_or(USAGE)?;
     let (mut probe, mut baseline, mut log, mut pid) = (None, None, None, None);
-    let mut hold_state: Option<String> = None;
     let (mut storage, mut led, mut allow_source_only) = (naga_pro::LIVE_STORAGE, None, false);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
@@ -193,7 +196,6 @@ fn validate(args: &[String]) -> Result<(), String> {
             "--probe" => probe = Some(value()?.clone()),
             "--baseline" => baseline = Some(value()?.clone()),
             "--log" => log = Some(value()?.clone()),
-            "--hold" => hold_state = Some(value()?.clone()),
             "--pid" => {
                 let v = value()?;
                 pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
@@ -233,37 +235,145 @@ fn validate(args: &[String]) -> Result<(), String> {
 
     let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
     let mode = chimerazer_devices::WriteMode::FirstValidation { allow_source_only };
-    let title = match &hold_state {
-        Some(_) => format!("Persistence check, phase 1: {param}"),
-        None => format!("Validation: {param}"),
+    let report = run(&mut dev, usb, param, &probe, &baseline, mode);
+    let md = render_report(
+        &format!("Validation: {param}"),
+        model,
+        usb,
+        &baseline,
+        param,
+        &probe,
+        &report,
+    );
+    finish_output(log, md, &report, param)
+}
+
+/// `dpi:1:800`, `dpi-stages:1:active=2`, `brightness:1:logo:100`.
+fn parse_item(item: &str) -> Result<(naga_pro::params::Param, String), String> {
+    let parts: Vec<&str> = item.split(':').collect();
+    let storage = |s: &str| {
+        s.parse::<u8>()
+            .map_err(|_| format!("bad storage in {item}"))
     };
-    let report = match &hold_state {
-        None => run(&mut dev, usb, param, &probe, &baseline, mode),
-        Some(state_path) => {
-            let (report, original) =
-                naga_pro::params::hold(&mut dev, usb, param, &probe, &baseline, mode);
-            if let Some(original) = original {
-                let probe_bytes = param.probe(&probe, &original)?;
-                let state = format!(
-                    "# chimerazer hold state\nparam = {name}\nstorage = {storage}\nled = {}\npid = {:04x}\noriginal = {}\nprobe = {}\nprobe_text = {probe}\nallow_source_only = {allow_source_only}\n",
-                    led.map_or("-".to_string(), |l| format!("{l:02x}")),
-                    usb.product_id,
-                    hex(&original),
-                    hex(&probe_bytes),
-                );
-                std::fs::write(state_path, state).map_err(|e| format!("{state_path}: {e}"))?;
-            }
-            report
+    let (param, probe) = match parts.as_slice() {
+        ["brightness", st, led, probe] => {
+            let led = match *led {
+                "scroll_wheel" => naga_pro::LED_SCROLL_WHEEL,
+                "logo" => naga_pro::LED_LOGO,
+                other => return Err(format!("unknown LED {other}")),
+            };
+            (
+                naga_pro::params::Param::parse("brightness", storage(st)?, Some(led))?,
+                *probe,
+            )
+        }
+        [name, st, probe] => (
+            naga_pro::params::Param::parse(name, storage(st)?, None)?,
+            *probe,
+        ),
+        _ => {
+            return Err(format!(
+                "bad item {item} (e.g. dpi:1:800, brightness:1:logo:100)"
+            ));
         }
     };
-    let md = render_report(&title, model, usb, &baseline, param, &probe, &report);
-    finish_output(log, md, &report, param)?;
-    if let (Some(path), true) = (&hold_state, report.passed) {
-        eprintln!(
-            "probe left in place; reconnect the mouse, then run: chimerazer finish {path} --baseline {baseline_path}"
-        );
+    Ok((param, probe.to_string()))
+}
+
+fn hold(args: &[String]) -> Result<(), String> {
+    let (mut baseline_path, mut state_path, mut log, mut pid) = (None, None, None, None);
+    let mut allow_source_only = false;
+    let mut items = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = || it.next().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--baseline" => baseline_path = Some(value()?.clone()),
+            "--state" => state_path = Some(value()?.clone()),
+            "--log" => log = Some(value()?.clone()),
+            "--pid" => {
+                let v = value()?;
+                pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
+            "--allow-source-only" => allow_source_only = true,
+            item => items.push(parse_item(item)?),
+        }
     }
+    let baseline_path = baseline_path.ok_or("--baseline is required")?;
+    let state_path = state_path.ok_or("--state is required")?;
+    if items.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let (hid, model, usb) = select(pid)?;
+    if *model != naga_pro::MODEL {
+        return Err(format!("hold is not implemented for {}", model.name));
+    }
+    let baseline = load_baseline(&baseline_path, model)?;
+    let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
+    let mode = chimerazer_devices::WriteMode::FirstValidation { allow_source_only };
+    let refs: Vec<(naga_pro::params::Param, &str)> =
+        items.iter().map(|(p, t)| (*p, t.as_str())).collect();
+    let (report, held) = naga_pro::params::hold(&mut dev, usb, &refs, &baseline, mode);
+    if let Some(held) = &held {
+        let mut state = format!(
+            "# chimerazer hold state\npid = {:04x}\nallow_source_only = {allow_source_only}\ncount = {}\n",
+            usb.product_id,
+            held.len()
+        );
+        for (i, h) in held.iter().enumerate() {
+            state.push_str(&format!(
+                "item.{i}.param = {}\nitem.{i}.original = {}\nitem.{i}.probe = {}\n",
+                param_token(h.param),
+                hex(&h.original),
+                hex(&h.probe)
+            ));
+        }
+        std::fs::write(&state_path, state).map_err(|e| format!("{state_path}: {e}"))?;
+    }
+    let probes: Vec<String> = items.iter().map(|(p, t)| format!("{p} = {t}")).collect();
+    let md = render_report(
+        "Persistence check, phase 1",
+        model,
+        usb,
+        &baseline,
+        report.param,
+        &probes.join("; "),
+        &report,
+    );
+    finish_output(log, md, &report, report.param)?;
+    eprintln!(
+        "probes left in place; reconnect the mouse, then run: chimerazer finish {state_path} --baseline {baseline_path}"
+    );
     Ok(())
+}
+
+/// `dpi:1`, `dpi-stages:1`, `brightness:1:logo` — the state-file form.
+fn param_token(p: naga_pro::params::Param) -> String {
+    use naga_pro::params::Param::*;
+    match p {
+        PollRate => "poll-rate:0".into(),
+        Dpi { storage } => format!("dpi:{storage}"),
+        DpiStages { storage } => format!("dpi-stages:{storage}"),
+        Brightness { storage, led } => format!(
+            "brightness:{storage}:{}",
+            if led == naga_pro::LED_LOGO {
+                "logo"
+            } else {
+                "scroll_wheel"
+            }
+        ),
+    }
+}
+
+fn load_baseline(
+    path: &str,
+    model: &Model,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    if !text.lines().any(|l| l == format!("# model {}", model.name)) {
+        return Err(format!("{path} is not a {} dump", model.name));
+    }
+    Ok(naga_pro::state::parse_text(&text))
 }
 
 fn finish(args: &[String]) -> Result<(), String> {
@@ -289,36 +399,36 @@ fn finish(args: &[String]) -> Result<(), String> {
             .map(|b| u8::from_str_radix(b, 16).map_err(|_| format!("{state_path}: bad {k}")))
             .collect()
     };
-    let led = match field("led")?.as_str() {
-        "-" => None,
-        l => Some(u8::from_str_radix(l, 16).map_err(|_| format!("{state_path}: bad led"))?),
-    };
-    let storage: u8 = field("storage")?
-        .parse()
-        .map_err(|_| format!("{state_path}: bad storage"))?;
-    let param = naga_pro::params::Param::parse(field("param")?, storage, led)?;
     let pid = u16::from_str_radix(field("pid")?, 16).map_err(|_| "bad pid".to_string())?;
-    let (original, probe) = (bytes("original")?, bytes("probe")?);
+    let count: usize = field("count")?
+        .parse()
+        .map_err(|_| "bad count".to_string())?;
+    let mut held = Vec::new();
+    for i in 0..count {
+        let (param, _) = parse_item(&format!("{}:x", field(&format!("item.{i}.param"))?))?;
+        held.push(naga_pro::params::Held {
+            param,
+            original: bytes(&format!("item.{i}.original"))?,
+            probe: bytes(&format!("item.{i}.probe"))?,
+        });
+    }
     let allow_source_only = field("allow_source_only")? == "true";
 
     let (hid, model, usb) = select(Some(pid))?;
-    let baseline_text =
-        std::fs::read_to_string(&baseline_path).map_err(|e| format!("{baseline_path}: {e}"))?;
-    let baseline = naga_pro::state::parse_text(&baseline_text);
+    let baseline = load_baseline(&baseline_path, model)?;
     let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
     let mode = chimerazer_devices::WriteMode::FirstValidation { allow_source_only };
-    let report =
-        naga_pro::params::finish_hold(&mut dev, usb, param, &original, &probe, &baseline, mode);
+    let report = naga_pro::params::finish_hold(&mut dev, usb, &held, &baseline, mode);
     let md = render_report(
-        &format!("Persistence check, phase 2: {param}"),
+        "Persistence check, phase 2",
         model,
         usb,
         &baseline,
-        param,
-        field("probe_text")?,
+        report.param,
+        "-",
         &report,
     );
-    finish_output(log, md, &report, param)
+    finish_output(log, md, &report, report.param)
 }
 
 fn render_report(
@@ -346,9 +456,10 @@ fn render_report(
     );
     for (i, step) in report.steps.iter().enumerate() {
         md.push_str(&format!(
-            "\n### {}. {} — {}\n\n",
+            "\n### {}. {} [{}] — {}\n\n",
             i + 1,
             step.name,
+            step.param,
             if step.ok { "ok" } else { "FAILED" }
         ));
         if let Some(e) = &step.expected {
@@ -503,4 +614,25 @@ fn decode(model: &Model, spec: &CommandSpec, req: &[u8], r: &Response) -> Option
         return None;
     };
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_items_round_trip_through_the_state_file() {
+        for item in [
+            "dpi:1:800",
+            "dpi-stages:1:active=2",
+            "brightness:1:logo:100",
+            "brightness:0:scroll_wheel:7",
+        ] {
+            let (param, probe) = parse_item(item).unwrap();
+            assert_eq!(format!("{}:{probe}", param_token(param)), item);
+        }
+        assert!(parse_item("dpi:9:800").is_err());
+        assert!(parse_item("brightness:1:nose:100").is_err());
+        assert!(parse_item("dpi").is_err());
+    }
 }
