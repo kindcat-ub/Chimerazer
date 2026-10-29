@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+mkdir -p "$project_dir/.artifacts/target" "$project_dir/.artifacts/tmp"
+export LOCAL_UID="$(id -u)"
+export LOCAL_GID="$(id -g)"
+exec docker compose -f "$project_dir/.devcontainer/compose.yaml" "$@"

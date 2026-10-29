@@ -1,0 +1,24 @@
+name: chimerazer-dev
+
+services:
+  dev:
+    container_name: chimerazer-dev
+    build:
+      context: .
+      args:
+        LOCAL_UID: ${LOCAL_UID:-1000}
+        LOCAL_GID: ${LOCAL_GID:-1000}
+    init: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: ..
+        target: /workspace
+      - cargo-cache:/home/dev/.cargo
+      - build-cache:/workspace/.artifacts/target
+
+volumes:
+  cargo-cache:
+  build-cache:
