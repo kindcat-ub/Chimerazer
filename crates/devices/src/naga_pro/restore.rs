@@ -12,15 +12,19 @@ use std::fmt;
 
 use chimerazer_transport::FeatureIo;
 
-use super::params::Param;
+use super::params::{Param, WriteError, write_value};
 use super::state::{VOLATILE_PREFIX, compare, read_snapshot};
 use super::*;
-use crate::{ExchangeError, Trace, UsbId, WriteMode, exchange, read_request, write_request};
+use crate::{Trace, UsbId, WriteMode, exchange, read_request};
 
 /// Values restore can write, profile storage first: the live layer of the
 /// active profile follows the profile, so it is usually unchanged by then.
 pub fn candidates() -> Vec<Param> {
-    let mut out = Vec::new();
+    let mut out = vec![Param::Button {
+        storage: 1,
+        slot: 2,
+        layer: 1,
+    }];
     for storage in [1, LIVE_STORAGE] {
         out.push(Param::Dpi { storage });
         out.push(Param::DpiStages { storage });
@@ -34,6 +38,13 @@ pub fn candidates() -> Vec<Param> {
         });
         for led in [LED_LOGO, LED_SCROLL_WHEEL] {
             out.push(Param::Effect { storage, led });
+        }
+        for slot in BUTTON_SLOTS {
+            out.push(Param::Button {
+                storage,
+                slot: slot.id,
+                layer: 0,
+            });
         }
     }
     out
@@ -140,41 +151,46 @@ fn read_value(
     param.extract(&response.args)
 }
 
-/// Writes `value` (already checked with [`Param::verified_for`]) in normal
-/// mode and reads it back; the read-back decides `entry.outcome`.
+/// Which writes `set` and `restore` may make. In use it is always
+/// [`NORMAL`]; tests swap it to exercise parameters not yet verified.
+#[derive(Clone, Copy)]
+struct Gate {
+    mode: WriteMode,
+    verified_on: fn(&Param, crate::Link) -> bool,
+    verified_for: fn(&Param, crate::Link, &[u8]) -> bool,
+}
+
+const NORMAL: Gate = Gate {
+    mode: WriteMode::Normal {
+        scopes: VERIFIED_WRITES,
+    },
+    verified_on: Param::verified_on,
+    verified_for: Param::verified_for,
+};
+
+/// Writes `value` (already checked with the gate) and reads it back; the
+/// read-back decides `entry.outcome`.
 fn write_verified(
     io: &mut impl FeatureIo,
     usb: &UsbId,
     param: Param,
     value: &[u8],
     entry: &mut Entry,
+    mode: WriteMode,
 ) {
-    let mode = WriteMode::Normal {
-        scopes: VERIFIED_WRITES,
-    };
-    let Some(spec) = param.write_spec_for(value) else {
-        entry.outcome = Outcome::Failed("value cannot be written, nothing sent".into());
+    let mut wrote = false;
+    let written = write_value(io, usb, param, value, mode, &mut entry.traces, &mut wrote);
+    if let Err(WriteError::Refused(e)) = written {
+        entry.outcome = Outcome::Failed(format!("write refused, nothing sent: {e}"));
         return;
-    };
-    let written = match write_request(usb, spec, param.read_spec(), &param.write_args(value), mode)
-    {
-        Ok(request) => {
-            let (trace, result) = exchange(io, usb, &request);
-            entry.traces.push(trace);
-            result.map(|_| ()).map_err(|e| match e {
-                ExchangeError::Device(s) => format!("device reported {s:?}"),
-                other => other.to_string(),
-            })
-        }
-        Err(e) => {
-            entry.outcome = Outcome::Failed(format!("write refused, nothing sent: {e}"));
-            return;
-        }
-    };
+    }
     match read_value(io, usb, param, &mut entry.traces) {
         Ok(after) => {
             entry.after = Some(param.render(&after));
             entry.outcome = match (after == value, written) {
+                (_, Err(WriteError::Preservation(e))) => {
+                    Outcome::Failed(format!("button preservation failed: {e}"))
+                }
                 (true, Ok(())) => Outcome::Restored {
                     note: String::new(),
                 },
@@ -228,7 +244,34 @@ pub fn set(io: &mut impl FeatureIo, usb: &UsbId, param: Param, text: &str) -> En
             usb.link
         ));
     } else {
-        write_verified(io, usb, param, &value, &mut entry);
+        write_verified(io, usb, param, &value, &mut entry, NORMAL.mode);
+    }
+    entry
+}
+
+/// First-validation tool: reads `param` and writes the same value back,
+/// with a read-back. Used to probe what a write does besides the value
+/// (for example the stored flag of a button); never in normal operation.
+pub fn rewrite(io: &mut impl FeatureIo, usb: &UsbId, param: Param) -> Entry {
+    let mut entry = Entry {
+        param,
+        key: param.dump_key(),
+        target: None,
+        before: None,
+        after: None,
+        outcome: Outcome::NotAttempted,
+        traces: Vec::new(),
+    };
+    match read_value(io, usb, param, &mut entry.traces) {
+        Ok(value) => {
+            entry.before = Some(param.render(&value));
+            entry.target = entry.before.clone();
+            let mode = WriteMode::FirstValidation {
+                allow_source_only: false,
+            };
+            write_verified(io, usb, param, &value, &mut entry, mode);
+        }
+        Err(e) => entry.outcome = Outcome::Failed(format!("read: {e}")),
     }
     entry
 }
@@ -241,6 +284,16 @@ pub fn restore(
     usb: &UsbId,
     dump: &BTreeMap<String, String>,
     dry_run: bool,
+) -> RestoreReport {
+    restore_gated(io, usb, dump, dry_run, NORMAL)
+}
+
+fn restore_gated(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    dump: &BTreeMap<String, String>,
+    dry_run: bool,
+    gate: Gate,
 ) -> RestoreReport {
     let mut report = RestoreReport::default();
     let refuse = |mut r: RestoreReport, why: String| {
@@ -292,7 +345,7 @@ pub fn restore(
     for param in candidates() {
         let key = param.dump_key();
         covered.extend(param.covered_keys());
-        if param.verified_on(usb.link) {
+        if (gate.verified_on)(&param, usb.link) {
             report.verified_keys.extend(param.covered_keys());
         }
         let mut entry = Entry {
@@ -304,7 +357,7 @@ pub fn restore(
             outcome: Outcome::NotAttempted,
             traces: Vec::new(),
         };
-        if !param.verified_on(usb.link) {
+        if !(gate.verified_on)(&param, usb.link) {
             entry.outcome = Outcome::Skipped(format!("write not verified for {:?}", usb.link));
             report.entries.push(entry);
             continue;
@@ -346,7 +399,7 @@ pub fn restore(
         // Some writes of a parameter are verified and others are not (the
         // `0F:02` layouts): the value itself must be writable. A skipped
         // value stays in `verified_keys`, so its difference fails the run.
-        if !param.verified_for(usb.link, &target) {
+        if !(gate.verified_for)(&param, usb.link, &target) {
             entry.outcome = Outcome::Skipped(format!(
                 "writing {} is not verified for {:?}",
                 param.render(&target),
@@ -361,7 +414,7 @@ pub fn restore(
             continue;
         }
 
-        write_verified(io, usb, param, &target, &mut entry);
+        write_verified(io, usb, param, &target, &mut entry, gate.mode);
         failed |= matches!(entry.outcome, Outcome::Failed(_));
         report.entries.push(entry);
     }
@@ -506,6 +559,234 @@ mod tests {
 
         let e = set(&mut sim, &WIRED, Param::Dpi { storage: 1 }, "50");
         assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
+    }
+
+    /// Restore writes profile 1 buttons, but leaves direct live writes closed.
+    #[test]
+    fn button_restore_writes_only_profile_one() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 80)).unwrap().0 = 1;
+        sim.buttons.get_mut(&(0, 80)).unwrap().0 = 1;
+        let dump = read_snapshot(&mut sim, &WIRED).values;
+        sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        sim.buttons.get_mut(&(0, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        let r = restore(&mut sim, &WIRED, &dump, false);
+        assert!(matches!(
+            outcome(&r, "p1.button.80"),
+            Outcome::Restored { .. }
+        ));
+        assert!(matches!(outcome(&r, "live.button.80"), Outcome::Skipped(_)));
+        assert_eq!(sim.buttons[&(1, 80)].1[3], 0x1e);
+        assert!(r.ok(), "{r:#?}");
+        assert!(
+            r.outside_scope()
+                .iter()
+                .any(|(k, _, _)| k == "live.button.80")
+        );
+        // Profile 1 and live layer-0 bindings are covered; profiles 2-5
+        // and the HyperShift layer are not.
+        let covered = |k: &String| {
+            (k.starts_with("p1.button.") || k.starts_with("live.button.")) && !k.ends_with(".hs")
+        };
+        assert!(!r.not_restorable.iter().any(covered));
+        assert!(r.not_restorable.contains(&"p1.button.80.hs".to_string()));
+        assert!(r.not_restorable.contains(&"p2.button.80".to_string()));
+    }
+
+    /// Once button writes are allowed, restore puts changed bindings back
+    /// from the dump and leaves the rest untouched.
+    #[test]
+    fn button_bindings_are_restored_from_a_dump() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 80)).unwrap().0 = 1;
+        sim.buttons.get_mut(&(0, 80)).unwrap().0 = 1;
+        let hs = sim.hypershift.clone();
+        let dump = read_snapshot(&mut sim, &WIRED).values;
+        sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        sim.buttons.get_mut(&(1, 85)).unwrap().1 = [0x0D, 0x04, 0, 0x52, 0, 0x37, 0];
+        sim.buttons.get_mut(&(0, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        let trusted = Gate {
+            mode: WriteMode::FirstValidation {
+                allow_source_only: false,
+            },
+            verified_on: |_, _| true,
+            verified_for: |_, _, _| true,
+        };
+        let r = restore_gated(&mut sim, &WIRED, &dump, false, trusted);
+        assert!(r.ok(), "{r:#?}");
+        for key in ["p1.button.80", "p1.button.85", "live.button.80"] {
+            assert!(
+                matches!(outcome(&r, key), Outcome::Restored { .. }),
+                "{key}"
+            );
+        }
+        assert_eq!(*outcome(&r, "p1.button.64"), Outcome::Unchanged);
+        assert_eq!(sim.buttons[&(1, 80)].0, 1);
+        assert_eq!(sim.buttons[&(0, 80)].0, 1);
+        assert_eq!(sim.hypershift, hs);
+        assert_eq!(sim.buttons[&(1, 85)].1, [0x02, 0x02, 0, 0x1E, 0, 0, 0]);
+        assert!(r.remaining.is_empty(), "{:?}", r.remaining);
+    }
+
+    #[test]
+    fn rewrite_writes_the_same_value_with_the_requested_layer() {
+        let mut sim = Sim::new();
+        let hs = Param::button_layer(1, 64, 1).unwrap();
+        let e = rewrite(&mut sim, &WIRED, hs);
+        assert!(matches!(e.outcome, Outcome::Restored { .. }), "{e:?}");
+        assert_eq!(e.traces[1].request[8..11], [1, 64, 1]);
+        // In the simulator, as on our unit, the layer byte becomes the flag.
+        assert_eq!(sim.buttons[&(1, 64)].0, 1);
+    }
+
+    #[test]
+    fn button_rewrite_preserves_flags_and_checks_prerequisites() {
+        for flag in [0, 1, 2] {
+            let mut sim = Sim::new();
+            sim.buttons.get_mut(&(1, 64)).unwrap().0 = flag;
+            let before = sim.buttons.clone();
+            let hs = sim.hypershift.clone();
+            let e = rewrite(&mut sim, &WIRED, Param::button(1, 64).unwrap());
+            assert_eq!(
+                matches!(e.outcome, Outcome::Restored { .. }),
+                flag <= 1,
+                "{e:?}"
+            );
+            assert_eq!(sim.buttons, before);
+            assert_eq!(sim.hypershift, hs);
+            let writes = e.traces.iter().filter(|t| t.request[7] == 0x0c).count();
+            assert_eq!(
+                writes,
+                match flag {
+                    0 => 1,
+                    1 => 2,
+                    _ => 0,
+                }
+            );
+        }
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 64)).unwrap().0 = 1;
+        sim.reject_hypershift_reads = true;
+        let e = rewrite(&mut sim, &WIRED, Param::button(1, 64).unwrap());
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        assert_eq!(sim.buttons[&(1, 64)].0, 1);
+    }
+
+    #[test]
+    fn button_rewrite_cannot_hide_a_failed_flag_replay() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 64)).unwrap().0 = 1;
+        sim.ignore_hypershift_writes = true;
+        let e = rewrite(&mut sim, &WIRED, Param::button(1, 64).unwrap());
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert_eq!(e.before, e.after);
+        assert_eq!(sim.buttons[&(1, 64)].0, 0);
+    }
+
+    #[test]
+    fn normal_set_and_restore_preserve_primary_and_secondary_bindings() {
+        let mut sim = Sim::new();
+        for slot in [2, 5] {
+            sim.buttons.get_mut(&(1, slot)).unwrap().0 = 1;
+        }
+        sim.buttons.get_mut(&(1, 3)).unwrap().1 = [1, 1, 3, 0, 0, 0, 0];
+        sim.buttons.get_mut(&(1, 5)).unwrap().1 = [1, 1, 5, 0, 0, 0, 0];
+        sim.hypershift.insert((1, 2), [1, 1, 2, 0, 0, 0, 0]);
+        let dump = read_snapshot(&mut sim, &RECEIVER).values;
+        let hs = sim.hypershift.clone();
+        for (p, value) in [
+            (Param::button_layer(1, 2, 1).unwrap(), "key:f8"),
+            (Param::button(1, 3).unwrap(), "hypershift"),
+            (Param::button(1, 5).unwrap(), "key:q"),
+        ] {
+            let e = set(&mut sim, &RECEIVER, p, value);
+            assert!(matches!(e.outcome, Outcome::Restored { .. }), "{e:?}");
+        }
+        assert_eq!(sim.buttons[&(1, 5)].0, 1);
+        assert_eq!(sim.hypershift[&(1, 5)], hs[&(1, 5)]);
+        let dry = restore(&mut sim, &RECEIVER, &dump, true);
+        assert!(
+            dry.entries
+                .iter()
+                .any(|e| matches!(e.outcome, Outcome::WouldRestore))
+        );
+        assert!(
+            dry.entries
+                .iter()
+                .all(|e| e.traces.iter().all(|t| t.request[7] != 0x0c))
+        );
+        let report = restore(&mut sim, &RECEIVER, &dump, false);
+        assert!(report.ok(), "{report:#?}");
+        assert!(report.remaining.is_empty(), "{:?}", report.remaining);
+        assert_eq!(sim.hypershift, hs);
+    }
+
+    #[test]
+    fn normal_secondary_write_refuses_a_flag_change_before_sending() {
+        let mut sim = Sim::new();
+        let p = Param::button_layer(1, 2, 1).unwrap();
+        let before = sim.hypershift.clone();
+        let e = set(&mut sim, &RECEIVER, p, "key:f8");
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        assert_eq!(sim.hypershift, before);
+        assert_eq!(sim.buttons[&(1, 2)].0, 0);
+    }
+
+    #[test]
+    fn normal_replay_failure_is_fatal_and_unverified_payloads_send_no_write() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 5)).unwrap().0 = 1;
+        sim.ignore_hypershift_writes = true;
+        let e = set(&mut sim, &WIRED, Param::button(1, 5).unwrap(), "key:q");
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        let mut sim = Sim::new();
+        for (p, value) in [
+            (Param::button(0, 3).unwrap(), "key:q"),
+            (Param::button(2, 3).unwrap(), "key:q"),
+            (Param::button(1, 9).unwrap(), "key:q"),
+            (Param::button_layer(1, 3, 1).unwrap(), "key:f8"),
+            (Param::button(1, 3).unwrap(), "raw:ffffffffffffff"),
+        ] {
+            let e = set(&mut sim, &RECEIVER, p, value);
+            assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
+            assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        }
+    }
+
+    #[test]
+    fn inactive_profile_one_is_never_written_in_normal_mode() {
+        let mut sim = Sim::new();
+        sim.active_profile = 2;
+        let dump = read_snapshot(&mut sim, &RECEIVER).values;
+        let e = set(&mut sim, &RECEIVER, Param::button(1, 5).unwrap(), "key:q");
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        sim.buttons.get_mut(&(1, 5)).unwrap().1 = [2, 2, 0, 0x46, 0, 0, 0];
+        let report = restore(&mut sim, &RECEIVER, &dump, false);
+        assert!(!report.ok(), "{report:#?}");
+        assert!(
+            report
+                .entries
+                .iter()
+                .all(|e| e.traces.iter().all(|t| t.request[7] != 0x0c))
+        );
+    }
+
+    #[test]
+    fn secondary_write_detects_a_primary_side_effect() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 2)).unwrap().0 = 1;
+        sim.hypershift_write_hits_primary = true;
+        let e = set(
+            &mut sim,
+            &RECEIVER,
+            Param::button_layer(1, 2, 1).unwrap(),
+            "key:f8",
+        );
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert_eq!(e.after.as_deref(), Some("key:f8"));
     }
 
     #[test]

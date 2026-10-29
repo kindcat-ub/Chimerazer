@@ -1,5 +1,7 @@
 //! `chimerazer` — command-line interface.
 
+mod watch;
+
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
@@ -19,12 +21,15 @@ usage:
   chimerazer dump [--pid PID] [--out FILE]
   chimerazer diff <FILE> <FILE>
   chimerazer validate <PARAM> --probe VALUE --baseline DUMP [--storage N]
-                      [--led scroll_wheel|logo] [--pid PID] [--log FILE]
+                      [--led scroll_wheel|logo] [--slot N] [--pid PID] [--log FILE]
                       [--allow-source-only]
   chimerazer hold ITEM.. --baseline DUMP --state FILE [--pid PID] [--log FILE]
-  chimerazer finish <STATE> --baseline DUMP [--log FILE]
+  chimerazer finish <STATE> --baseline DUMP [--pid PID] [--log FILE]
   chimerazer restore <DUMP> [--dry-run] [--pid PID] [--log FILE]
   chimerazer set ITEM.. [--pid PID]
+  chimerazer buttons <DUMP> [--storage N]
+  chimerazer watch [--seconds N]
+  chimerazer rewrite ITEM.. --pid PID
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
@@ -33,8 +38,8 @@ usage:
          (no serial number; transport details as `#` comments).
   diff   compares two dumps, ignoring comments and `volatile.*` keys.
   validate  first hardware validation of a write (M2): PARAM is poll-rate,
-         dpi, dpi-stages, brightness or effect (probe RRGGBB for static
-         colour, or spectrum). Refuses to write unless DUMP has no
+         dpi, dpi-stages, brightness, effect (probe RRGGBB for static
+         colour, or spectrum) or button (--slot, probe as for set). Refuses to write unless DUMP has no
          read errors and matches the device. Writes the same value, the
          probe and the original back, reading after each write, then checks
          the whole device against DUMP. --log writes the protocol (markdown).
@@ -53,7 +58,18 @@ usage:
          reports what would change.
   set    writes values in normal mode (ITEM as for hold, e.g. dpi:1:800,
          effect:1:logo:ff00ff); only writes verified on this link, each
-         read back. Stops at the first failure.";
+         read back. Stops at the first failure.
+         Buttons: button:<storage>:<slot>:<binding>, binding is disabled,
+         mouse:<left|right|middle|back|forward|scroll-up|scroll-down>,
+         key:[mods+]<key> (ctrl shift alt super, r-prefixed for right),
+         dpi:<down|up|cycle>, profile-cycle, hypershift or raw:<14 hex>; turbo=<rate>
+         after mouse/key (key:up,turbo=55 or quoted \"key:up turbo=55\").
+  buttons  decodes the 30 button slots of a dump (no device access).
+  watch  prints the keys, buttons and wheel events the mouse sends (evdev,
+         needs read access to /dev/input/event*, e.g. group input).
+  rewrite  research aid (first validation): reads each ITEM (as for set,
+         without the value: button:1:64, button-hs:1:64) and writes the
+         same value back with a read-back. --pid is required.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -67,6 +83,9 @@ fn main() -> ExitCode {
         Some("finish") => finish(&args[1..]),
         Some("restore") => restore(&args[1..]),
         Some("set") => set(&args[1..]),
+        Some("buttons") => buttons(&args[1..]),
+        Some("watch") => watch::watch(&args[1..]),
+        Some("rewrite") => rewrite(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -205,6 +224,7 @@ fn validate(args: &[String]) -> Result<(), String> {
     let (name, rest) = args.split_first().ok_or(USAGE)?;
     let (mut probe, mut baseline, mut log, mut pid) = (None, None, None, None);
     let (mut storage, mut led, mut allow_source_only) = (naga_pro::LIVE_STORAGE, None, false);
+    let mut slot = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().ok_or(format!("{a} needs a value"));
@@ -227,13 +247,21 @@ fn validate(args: &[String]) -> Result<(), String> {
                     other => return Err(format!("unknown LED {other}")),
                 })
             }
+            "--slot" => {
+                let v = value()?;
+                slot = Some(v.parse::<u8>().map_err(|_| format!("bad slot {v}"))?);
+            }
             "--allow-source-only" => allow_source_only = true,
             other => return Err(format!("unexpected argument {other}\n{USAGE}")),
         }
     }
     let probe = probe.ok_or("--probe is required")?;
     let baseline_path = baseline.ok_or("--baseline is required (a dump taken just before)")?;
-    let param = Param::parse(name, storage, led)?;
+    let param = match (name.as_str(), slot) {
+        ("button", Some(slot)) => Param::button(storage, slot)?,
+        ("button", None) => return Err("button needs --slot N".into()),
+        _ => Param::parse(name, storage, led)?,
+    };
 
     let (hid, model, usb) = select(pid)?;
     if *model != naga_pro::MODEL {
@@ -266,6 +294,23 @@ fn validate(args: &[String]) -> Result<(), String> {
 
 /// `dpi:1:800`, `dpi-stages:1:active=2`, `brightness:1:logo:100`.
 fn parse_item(item: &str) -> Result<(naga_pro::params::Param, String), String> {
+    // The binding text may contain ':' itself (key:ctrl+f5).
+    let button = item
+        .strip_prefix("button:")
+        .map(|r| (r, 0))
+        .or_else(|| item.strip_prefix("button-hs:").map(|r| (r, 1)));
+    if let Some((rest, layer)) = button {
+        let mut parts = rest.splitn(3, ':');
+        let (Some(st), Some(slot), Some(binding)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(format!("bad item {item} (e.g. button:1:80:key:f5)"));
+        };
+        let num = |s: &str| s.parse::<u8>().map_err(|_| format!("bad number in {item}"));
+        return Ok((
+            naga_pro::params::Param::button_layer(num(st)?, num(slot)?, layer)?,
+            binding.to_string(),
+        ));
+    }
     let parts: Vec<&str> = item.split(':').collect();
     let storage = |s: &str| {
         s.parse::<u8>()
@@ -373,6 +418,12 @@ fn param_token(p: naga_pro::params::Param) -> String {
     use naga_pro::params::Param::*;
     match p {
         PollRate => "poll-rate:0".into(),
+        Button {
+            storage,
+            slot,
+            layer: 0,
+        } => format!("button:{storage}:{slot}"),
+        Button { storage, slot, .. } => format!("button-hs:{storage}:{slot}"),
         Dpi { storage } => format!("dpi:{storage}"),
         DpiStages { storage } => format!("dpi-stages:{storage}"),
         Brightness { storage, led } | Effect { storage, led } => format!(
@@ -404,11 +455,16 @@ fn load_baseline(
 
 fn finish(args: &[String]) -> Result<(), String> {
     let (state_path, rest) = args.split_first().ok_or(USAGE)?;
-    let (mut baseline_path, mut log) = (None, None);
+    let (mut baseline_path, mut log, mut pid_override) = (None, None, None);
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().ok_or(format!("{a} needs a value"));
         match a.as_str() {
+            "--pid" => {
+                let v = value()?;
+                pid_override =
+                    Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
             "--baseline" => baseline_path = Some(value()?.clone()),
             "--log" => log = Some(value()?.clone()),
             other => return Err(format!("unexpected argument {other}\n{USAGE}")),
@@ -440,7 +496,11 @@ fn finish(args: &[String]) -> Result<(), String> {
     }
     let allow_source_only = field("allow_source_only")? == "true";
 
-    let (hid, model, usb) = select(Some(pid))?;
+    // The same unit may be finished over its other link (`--pid`).
+    let (hid, model, usb) = select(Some(pid_override.unwrap_or(pid)))?;
+    if lookup(pid).map(|(m, _)| m) != Some(model) {
+        return Err(format!("{state_path} was written for another model"));
+    }
     let baseline = load_baseline(&baseline_path, model)?;
     let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
     let mode = chimerazer_devices::WriteMode::FirstValidation { allow_source_only };
@@ -644,6 +704,70 @@ fn set(args: &[String]) -> Result<(), String> {
             e.outcome
         );
         if !matches!(e.outcome, Outcome::Restored { .. } | Outcome::Unchanged) {
+            return Err(format!("stopped at {param}"));
+        }
+    }
+    Ok(())
+}
+
+fn buttons(args: &[String]) -> Result<(), String> {
+    use naga_pro::params::Param;
+
+    let (path, rest) = args.split_first().ok_or(USAGE)?;
+    let storage = match rest {
+        [] => 1,
+        [flag, n] if flag == "--storage" => n.parse().map_err(|_| format!("bad storage {n}"))?,
+        _ => return Err(USAGE.to_string()),
+    };
+    let dump = load_baseline(path, &naga_pro::MODEL)?;
+    for slot in naga_pro::BUTTON_SLOTS {
+        let param = Param::button(storage, slot.id)?;
+        let key = param.dump_key();
+        let shown = match dump.get(&key).map(|v| (v, param.from_dump(v))) {
+            Some((v, Ok(block))) => format!("{:<28} {v}", param.render(&block)),
+            Some((v, Err(_))) => v.clone(),
+            None => "-".into(),
+        };
+        println!(
+            "{:>3}  {:<17} {:<16} {shown}",
+            slot.id,
+            format!("{:?}", slot.group),
+            slot.name
+        );
+    }
+    Ok(())
+}
+
+fn rewrite(args: &[String]) -> Result<(), String> {
+    let (mut pid, mut items) = (None, Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pid" => {
+                let v = it.next().ok_or("--pid needs a value")?;
+                pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
+            item => items.push(parse_item(&format!("{item}:x"))?.0),
+        }
+    }
+    let pid = pid.ok_or("rewrite needs --pid")?;
+    if items.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let (hid, model, usb) = select(Some(pid))?;
+    if *model != naga_pro::MODEL {
+        return Err(format!("rewrite is not implemented for {}", model.name));
+    }
+    let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
+    for param in items {
+        let e = naga_pro::restore::rewrite(&mut dev, usb, param);
+        println!(
+            "{param}: {} -> {}: {}",
+            e.before.as_deref().unwrap_or("-"),
+            e.after.as_deref().unwrap_or("-"),
+            e.outcome
+        );
+        if !matches!(e.outcome, naga_pro::restore::Outcome::Restored { .. }) {
             return Err(format!("stopped at {param}"));
         }
     }
@@ -858,6 +982,9 @@ mod tests {
             "brightness:0:scroll_wheel:7",
             "effect:1:logo:ff00ff",
             "effect:0:scroll_wheel:spectrum",
+            "button:1:80:key:ctrl+f5",
+            "button:0:85:key:up turbo=55",
+            "button-hs:1:64:key:1",
         ] {
             let (param, probe) = parse_item(item).unwrap();
             assert_eq!(format!("{}:{probe}", param_token(param)), item);
@@ -865,5 +992,7 @@ mod tests {
         assert!(parse_item("dpi:9:800").is_err());
         assert!(parse_item("brightness:1:nose:100").is_err());
         assert!(parse_item("dpi").is_err());
+        assert!(parse_item("button:1:6:key:a").is_err());
+        assert!(parse_item("button:1:80").is_err());
     }
 }

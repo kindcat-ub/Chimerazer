@@ -4,6 +4,7 @@
 //! OpenRazer; see `docs/protocol/naga-pro.md` for the provenance of every
 //! command.
 
+pub mod binding;
 pub mod params;
 pub mod restore;
 #[cfg(test)]
@@ -367,61 +368,73 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
         command: SET_DPI.command,
         link: Link::Wired,
         storage: Some(LIVE_STORAGE),
+        accepts: None,
     },
     WriteScope {
         command: SET_DPI.command,
         link: Link::Wired,
         storage: Some(1),
+        accepts: None,
     },
     WriteScope {
         command: SET_DPI.command,
         link: Link::Receiver,
         storage: Some(1),
+        accepts: None,
     },
     WriteScope {
         command: SET_DPI.command,
         link: Link::Receiver,
         storage: Some(LIVE_STORAGE),
+        accepts: None,
     },
     WriteScope {
         command: SET_DPI_STAGES.command,
         link: Link::Wired,
         storage: Some(LIVE_STORAGE),
+        accepts: None,
     },
     WriteScope {
         command: SET_DPI_STAGES.command,
         link: Link::Wired,
         storage: Some(1),
+        accepts: None,
     },
     WriteScope {
         command: SET_DPI_STAGES.command,
         link: Link::Receiver,
         storage: Some(1),
+        accepts: None,
     },
     WriteScope {
         command: SET_LED_BRIGHTNESS.command,
         link: Link::Wired,
         storage: Some(LIVE_STORAGE),
+        accepts: None,
     },
     WriteScope {
         command: SET_LED_BRIGHTNESS.command,
         link: Link::Wired,
         storage: Some(1),
+        accepts: None,
     },
     WriteScope {
         command: SET_LED_BRIGHTNESS.command,
         link: Link::Receiver,
         storage: Some(1),
+        accepts: None,
     },
     WriteScope {
         command: SET_LED_STATIC.command,
         link: Link::Wired,
         storage: Some(LIVE_STORAGE),
+        accepts: None,
     },
     WriteScope {
         command: SET_LED_STATIC.command,
         link: Link::Wired,
         storage: Some(1),
+        accepts: None,
     },
     // Restoring spectrum into a profile after an effect change is not
     // verified; only the live layer is.
@@ -429,11 +442,154 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
         command: SET_LED_SPECTRUM.command,
         link: Link::Wired,
         storage: Some(LIVE_STORAGE),
+        accepts: None,
+    },
+    WriteScope {
+        command: SET_BUTTON_FUNCTION.command,
+        link: Link::Wired,
+        storage: Some(1),
+        accepts: Some(wired_button_args),
+    },
+    WriteScope {
+        command: SET_BUTTON_FUNCTION.command,
+        link: Link::Receiver,
+        storage: Some(1),
+        accepts: Some(receiver_button_args),
     },
 ];
 
+/// Replay is private to the read-before-write preservation path. It does
+/// not grant `set`/`restore` permission to edit other secondary bindings.
+const BUTTON_REPLAY_WRITES: &[WriteScope] = &[
+    WriteScope {
+        command: SET_BUTTON_FUNCTION.command,
+        link: Link::Wired,
+        storage: Some(1),
+        accepts: Some(button_replay_args),
+    },
+    WriteScope {
+        command: SET_BUTTON_FUNCTION.command,
+        link: Link::Receiver,
+        storage: Some(1),
+        accepts: Some(button_replay_args),
+    },
+];
+
+fn button_slot_verified(slot: u8) -> bool {
+    ![9, 10].contains(&slot) && BUTTON_SLOTS.iter().any(|s| s.id == slot)
+}
+
+fn button_param_verified(storage: u8, slot: u8, layer: u8, link: Link) -> bool {
+    storage == 1
+        && button_slot_verified(slot)
+        && (layer == 0 || (layer == 1 && slot == 2 && link == Link::Receiver))
+}
+
+fn button_replay_args(args: &[u8]) -> bool {
+    args.len() == 10 && args[0] == 1 && button_slot_verified(args[1]) && args[2] == 1
+}
+
+fn wired_button_args(args: &[u8]) -> bool {
+    button_args_verified(args, Link::Wired)
+}
+
+fn receiver_button_args(args: &[u8]) -> bool {
+    button_args_verified(args, Link::Receiver)
+}
+
+/// Verified formats plus the exact native values restored during the
+/// 30-slot run. Unknown raw blocks and untested function variants stay closed.
+fn button_args_verified(args: &[u8], link: Link) -> bool {
+    use binding::Binding;
+    let Ok(block) = <&[u8; 7]>::try_from(args.get(3..).unwrap_or_default()) else {
+        return false;
+    };
+    let (storage, slot, layer) = (args[0], args[1], args[2]);
+    if !button_param_verified(storage, slot, layer, link) {
+        return false;
+    }
+    let b = Binding::decode(block);
+    if layer == 1 {
+        return matches!(
+            b,
+            Binding::Key {
+                mods: 0,
+                key: 0x41,
+                native: false
+            } | Binding::Mouse { button: 2 }
+        );
+    }
+    if matches!(
+        b,
+        Binding::Key {
+            mods: 0,
+            key: 4..=0x73,
+            native: false
+        }
+    ) {
+        return true;
+    }
+    let captured_original = match b {
+        Binding::Mouse { button } => slot == button && (1..=5).contains(&slot),
+        Binding::Dpi { action: 1 } => slot == 11,
+        Binding::Dpi { action: 2 } => slot == 12,
+        Binding::ProfileCycle => slot == 14,
+        Binding::MouseTurbo {
+            button: 9,
+            rate: 100,
+            native: false,
+        } => slot == 52,
+        Binding::MouseTurbo {
+            button: 10,
+            rate: 100,
+            native: false,
+        } => slot == 53,
+        Binding::KeyTurbo {
+            mods: 0,
+            key: 0x52,
+            rate: 55,
+        } => slot == 85,
+        _ => false,
+    };
+    captured_original
+        || (link == Link::Receiver
+            && matches!(
+                (slot, b),
+                (
+                    3,
+                    Binding::Key {
+                        mods: 3,
+                        key: 0x41,
+                        native: false
+                    } | Binding::Hypershift
+                        | Binding::ProfileCycle
+                ) | (
+                    52,
+                    Binding::KeyTurbo {
+                        mods: 0,
+                        key: 0x42,
+                        rate: 100
+                    }
+                ) | (53, Binding::Dpi { action: 6 })
+                    | (11, Binding::Dpi { action: 2 })
+                    | (12, Binding::Dpi { action: 1 })
+            ))
+}
+
 /// Write commands implemented in code. Every first write goes through
 /// [`params`] validation; see `docs/ARCHITECTURE.md`.
+/// `02:0C`: `[storage, slot, hypershift, block×7]`. Normal operations are restricted by argument predicates.
+pub const SET_BUTTON_FUNCTION: CommandSpec = CommandSpec {
+    command: Command::new(0x02, 0x0C, 0x0A),
+    name: "set button function",
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m4-validation",
+        "opensnek-naga-side-panels",
+        "opensnek-naga-default-banks",
+    ],
+};
+
 /// `0F:02` static colour: `[storage, led, 01, 00, 00, 01, r, g, b]`.
 pub const SET_LED_STATIC: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x02, 0x09),
@@ -457,6 +613,7 @@ pub const WRITE_COMMANDS: &[CommandSpec] = &[
     SET_LED_BRIGHTNESS,
     SET_LED_STATIC,
     SET_LED_SPECTRUM,
+    SET_BUTTON_FUNCTION,
 ];
 
 /// A 7-byte button function block: `[class, len, data..]`.

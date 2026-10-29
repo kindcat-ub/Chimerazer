@@ -27,6 +27,18 @@ pub struct Sim {
     pub brightness: HashMap<(u8, u8), u8>,
     /// `0F:82` effect bytes (`args[2..12]`) by storage and LED.
     pub effect: HashMap<(u8, u8), [u8; 10]>,
+    /// `02:8C` stored flag and block of layer 0 by storage and slot.
+    pub buttons: HashMap<(u8, u8), (u8, [u8; 7])>,
+    /// The HyperShift layer (`02:8C` with layer 1) by storage and slot.
+    pub hypershift: HashMap<(u8, u8), [u8; 7]>,
+    /// A layer-0 button write also changes the HyperShift block.
+    pub button_write_hits_hypershift: bool,
+    /// Layer-1 writes report success but leave the flag and block unchanged.
+    pub ignore_hypershift_writes: bool,
+    /// Layer-1 reads fail (used to check that preservation is prepared first).
+    pub reject_hypershift_reads: bool,
+    pub active_profile: u8,
+    pub hypershift_write_hits_primary: bool,
     pub poll: u8,
     pub ignore_writes: bool,
     /// A write to DPI also changes brightness on storage 0, LED 1.
@@ -40,6 +52,7 @@ impl Sim {
     pub fn new() -> Self {
         let mut s = Self {
             poll: 0x01,
+            active_profile: 1,
             ..Self::default()
         };
         for st in 0..=5 {
@@ -56,6 +69,12 @@ impl Sim {
             s.brightness.insert((st, 0x04), 51);
             for led in [0x01, 0x04] {
                 s.effect.insert((st, led), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            }
+            for slot in BUTTON_SLOTS {
+                let block = [0x02, 0x02, 0, 0x1E, 0, 0, 0];
+                s.buttons.insert((st, slot.id), (0, block));
+                s.hypershift
+                    .insert((st, slot.id), [0x02, 0x02, 0, 0x1F, 0, 0, 0]);
             }
         }
         s
@@ -85,6 +104,29 @@ impl FeatureIo for Sim {
                 (0x0F, 0x04) => {
                     self.brightness.insert((a[0], a[1]), a[2]);
                 }
+                (0x02, 0x0C) => {
+                    if a[2] == 1 && self.ignore_hypershift_writes {
+                        out[0] = Status::Ok.to_byte();
+                        out[88] = crc(&out);
+                        self.reply = Some(out);
+                        return Ok(());
+                    }
+                    let block: [u8; 7] = a[3..10].try_into().unwrap();
+                    // As on our unit: the write's layer byte becomes the
+                    // slot's stored flag, whichever layer it addresses.
+                    self.buttons.get_mut(&(a[0], a[1])).unwrap().0 = a[2];
+                    if a[2] == 1 {
+                        self.hypershift.insert((a[0], a[1]), block);
+                        if self.hypershift_write_hits_primary {
+                            self.buttons.get_mut(&(a[0], a[1])).unwrap().1 = [0; 7];
+                        }
+                    } else {
+                        self.buttons.get_mut(&(a[0], a[1])).unwrap().1 = block;
+                        if self.button_write_hits_hypershift {
+                            self.hypershift.insert((a[0], a[1]), [0; 7]);
+                        }
+                    }
+                }
                 (0x0F, 0x02) => {
                     let mut e = [0; 10];
                     let n = usize::from(report[5]).saturating_sub(2).min(10);
@@ -103,6 +145,15 @@ impl FeatureIo for Sim {
                     args[1..1 + t.len()].copy_from_slice(t);
                 }
                 (0x0F, 0x84) => args[2] = self.brightness[&(a[0], a[1])],
+                (0x02, 0x8C) => {
+                    let (flag, block) = self.buttons[&(a[0], a[1])];
+                    args[2] = flag;
+                    if a[2] == 1 {
+                        args[3..10].copy_from_slice(&self.hypershift[&(a[0], a[1])]);
+                    } else {
+                        args[3..10].copy_from_slice(&block);
+                    }
+                }
                 (0x0F, 0x82) => args[2..12].copy_from_slice(&self.effect[&(a[0], a[1])]),
                 (0x02, 0x84) => {
                     args[0] = 30;
@@ -110,12 +161,15 @@ impl FeatureIo for Sim {
                         args[1 + i] = s.id;
                     }
                 }
+                (0x05, 0x84) => args[0] = self.active_profile,
                 (0x05, 0x81) => args[..5].copy_from_slice(&[5, 1, 2, 3, 4]),
                 (0x00, 0x81) => args[..2].copy_from_slice(&[2, 3]),
                 _ => {}
             }
         }
-        out[0] = if write && self.nack_applied_writes {
+        out[0] = if (write && self.nack_applied_writes)
+            || (!write && class == 2 && id == 0x8c && a[2] == 1 && self.reject_hypershift_reads)
+        {
             Status::Failed.to_byte()
         } else {
             Status::Ok.to_byte()

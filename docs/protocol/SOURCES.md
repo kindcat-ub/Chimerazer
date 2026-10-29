@@ -10,6 +10,8 @@
 | [OpenRazer](https://github.com/openrazer/openrazer) | GPL-2.0-or-later | `477f4d6d3ab7e9deb6310d5bd3742560c5cbe80d` | только факты |
 | [Snakecharmer](https://github.com/asavs/snakecharmer) | GPL-2.0-or-later | `f3155720095f7b78fa8fd661268993143f3e3664` | только факты и подходы |
 
+Дополнительный источник фактов для включателя HyperShift: [OpenSynapse](https://github.com/A1mAssist/OpenSynapse), MIT, commit `1f16527fea6a9f6eeeba3ee714ad7ce6422edd5c`. Код не переносился.
+
 ## Источники
 
 | ID | Проект | Путь | Содержание |
@@ -26,3 +28,7 @@
 | `snakecharmer-spec` | Snakecharmer | `docs/SPEC.md`, `docs/ONBOARD-KEYMAP.md` | Расхождения VARSTORE/NOSTORE при записи DPI, подход safety-latch. |
 | `chimerazer-m1-reads` | Chimerazer | `fixtures/naga-pro/our-hardware-frames.txt` | Сырые кадры чтения с нашего экземпляра Naga Pro, провод `008F` и свисток `0090` (M1, 2026-10-28). |
 | `chimerazer-m2-validation` | Chimerazer | `docs/validation/naga-pro/` | Протоколы первичной аппаратной валидации записи на нашем экземпляре Naga Pro. |
+| `chimerazer-m4-hypershift-read` | Chimerazer | у владельца, `~/chimerazer-m4/hypershift.md` | Чтение `02:8C` со слоем `01` и `00` для 30 слотов, storage 0 и 1, наш экземпляр по проводу. |
+| `opensynapse-obm` | OpenSynapse | `src/OpenSynapse.Windows/Protocols/ViperObmProtocol.cs` | `ModeButtonKey = 12`, данные `[1]`; источник кандидата блока включателя HyperShift, затем проверенного на нашей Naga Pro. |
+| `chimerazer-m4-hypershift-write` | Chimerazer | `docs/validation/naga-pro/02-0C-hypershift.md` | Средняя как включатель, F8 на правой во втором слое, сохранение после выключения и полный возврат через ресивер. |
+| `chimerazer-m4-validation` | Chimerazer | `docs/validation/naga-pro/02-0C-*.md` | Запись назначений, сохранение флагов, нажатия, выключение и возврат на нашей Naga Pro; область обычной записи ограничена аргументами. |
