@@ -384,22 +384,32 @@ mod tests {
     }
 
     #[test]
-    fn receiver_restores_only_live_dpi() {
+    fn receiver_restores_profile_1_and_skips_unverified_live_values() {
         let mut sim = Sim::new();
         let dump = read_snapshot(&mut sim, &RECEIVER).values;
         sim.dpi.insert(1, [0x03, 0x20, 0x03, 0x20]);
-        sim.dpi.insert(0, [0x03, 0x20, 0x03, 0x20]);
+        sim.brightness.insert((1, LED_LOGO), 100);
+        // Live brightness through the receiver is not verified.
+        sim.brightness.insert((0, LED_LOGO), 100);
         let r = restore(&mut sim, &RECEIVER, &dump, false);
-        assert!(matches!(outcome(&r, "p1.dpi"), Outcome::Skipped(_)));
-        assert!(matches!(outcome(&r, "live.dpi"), Outcome::Restored { .. }));
-        // Profile 1 was not written through the receiver.
-        assert_eq!(sim.dpi[&1], [0x03, 0x20, 0x03, 0x20]);
-        assert!(r.remaining.iter().any(|(k, _, _)| k == "p1.dpi"));
-        // Profile 1 is outside the receiver's verified scope: reported
-        // separately, not counted as unrestored.
+        assert!(matches!(outcome(&r, "p1.dpi"), Outcome::Restored { .. }));
+        assert!(matches!(
+            outcome(&r, "p1.led.logo.brightness"),
+            Outcome::Restored { .. }
+        ));
+        assert!(matches!(
+            outcome(&r, "live.led.logo.brightness"),
+            Outcome::Skipped(_)
+        ));
+        assert_eq!(sim.brightness[&(0, LED_LOGO)], 100);
+        // The unverified value is reported separately, not as unrestored.
         assert!(r.ok(), "{r:#?}");
         assert!(r.unrestored().is_empty());
-        assert!(r.outside_scope().iter().any(|(k, _, _)| k == "p1.dpi"));
+        assert!(
+            r.outside_scope()
+                .iter()
+                .any(|(k, _, _)| k == "live.led.logo.brightness")
+        );
     }
 
     #[test]

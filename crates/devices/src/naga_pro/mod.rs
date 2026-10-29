@@ -359,8 +359,8 @@ pub const SET_LED_BRIGHTNESS: CommandSpec = CommandSpec {
 
 /// Where each verified write may run in normal operation (restore). Every
 /// entry is backed by a protocol in `docs/validation/naga-pro/`. Profiles
-/// 2–5 and writes to profile storage through the receiver are not here
-/// because they have not been validated.
+/// 2–5, and the live layer through the receiver for stages and brightness,
+/// are not here because they have not been validated.
 pub const VERIFIED_WRITES: &[WriteScope] = &[
     WriteScope {
         command: SET_DPI.command,
@@ -370,6 +370,11 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
     WriteScope {
         command: SET_DPI.command,
         link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Receiver,
         storage: Some(1),
     },
     WriteScope {
@@ -388,6 +393,11 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
         storage: Some(1),
     },
     WriteScope {
+        command: SET_DPI_STAGES.command,
+        link: Link::Receiver,
+        storage: Some(1),
+    },
+    WriteScope {
         command: SET_LED_BRIGHTNESS.command,
         link: Link::Wired,
         storage: Some(LIVE_STORAGE),
@@ -395,6 +405,11 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
     WriteScope {
         command: SET_LED_BRIGHTNESS.command,
         link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_LED_BRIGHTNESS.command,
+        link: Link::Receiver,
         storage: Some(1),
     },
 ];
