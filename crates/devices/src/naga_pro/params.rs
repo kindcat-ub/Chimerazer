@@ -382,6 +382,133 @@ fn run<IO: FeatureIo>(
     probe: &str,
     baseline: &BTreeMap<String, String>,
 ) -> bool {
+    let Some((original, probe)) = start(r, probe, baseline) else {
+        return false;
+    };
+    run_writes(r, &original, &probe, baseline)
+}
+
+/// Step 1 and the original value: `None` if writing must not start.
+fn start<IO: FeatureIo>(
+    r: &mut Runner<'_, IO>,
+    probe: &str,
+    baseline: &BTreeMap<String, String>,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if !baseline_matches(r, baseline) {
+        return None;
+    }
+    let mut traces = Vec::new();
+    let original = match r.read(&mut traces) {
+        Ok(v) => v,
+        Err(e) => {
+            r.note("read original", false, e, traces);
+            return None;
+        }
+    };
+    let probe = match r.param.probe(probe, &original) {
+        Ok(p) => p,
+        Err(e) => {
+            r.note("read original", false, format!("bad probe: {e}"), traces);
+            return None;
+        }
+    };
+    let rendered = r.param.render(&original);
+    r.note("read original", true, rendered, traces);
+    Some((original, probe))
+}
+
+/// Persistence check, phase 1: steps 1–2, then the probe is written and
+/// left in place so the device can be reconnected. Returns the report and,
+/// on success, the original value to pass to [`finish_hold`].
+pub fn hold(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    param: Param,
+    probe: &str,
+    baseline: &BTreeMap<String, String>,
+    mode: WriteMode,
+) -> (Report, Option<Vec<u8>>) {
+    let mut r = Runner {
+        io,
+        usb,
+        param,
+        mode,
+        steps: Vec::new(),
+        wrote: false,
+    };
+    let held = start(&mut r, probe, baseline).and_then(|(original, probe)| {
+        let ok = matches!(r.write_step("write same value", &original), Ok(true))
+            && matches!(r.write_step("write probe (held)", &probe), Ok(true));
+        if ok {
+            return Some(original);
+        }
+        if r.wrote {
+            let _ = r.write_step("restore original", &original);
+            final_snapshot(&mut r, baseline);
+        }
+        None
+    });
+    let report = Report {
+        param,
+        steps: r.steps,
+        passed: held.is_some(),
+    };
+    (report, held)
+}
+
+/// Persistence check, phase 2 (after a reconnect): records what the device
+/// holds now, restores `original`, and compares the whole device with the
+/// baseline taken before phase 1.
+pub fn finish_hold(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    param: Param,
+    original: &[u8],
+    probe: &[u8],
+    baseline: &BTreeMap<String, String>,
+    mode: WriteMode,
+) -> Report {
+    let mut r = Runner {
+        io,
+        usb,
+        param,
+        mode,
+        steps: Vec::new(),
+        wrote: false,
+    };
+    let mut traces = Vec::new();
+    let passed = match r.read(&mut traces) {
+        Ok(now) => {
+            let verdict = if now == probe {
+                "the probe survived the reconnect"
+            } else if now == original {
+                "the device reverted to the original value"
+            } else {
+                "the device holds a third value"
+            };
+            let note = format!("after reconnect: {} — {verdict}", param.render(&now));
+            r.note("read after reconnect", true, note, traces);
+            let restored = matches!(r.write_step("restore original", original), Ok(true));
+            let clean = final_snapshot(&mut r, baseline);
+            restored && clean
+        }
+        Err(e) => {
+            r.note("read after reconnect", false, e, traces);
+            false
+        }
+    };
+    Report {
+        param,
+        steps: r.steps,
+        passed,
+    }
+}
+
+/// Refuses a baseline with read errors or one the device no longer matches.
+fn baseline_matches<IO: FeatureIo>(
+    r: &mut Runner<'_, IO>,
+    baseline: &BTreeMap<String, String>,
+) -> bool {
     // Step 1: a complete baseline that matches the device.
     let errors = baseline_errors(baseline);
     if !errors.is_empty() {
@@ -417,30 +544,22 @@ fn run<IO: FeatureIo>(
         vec![],
     );
 
-    let mut traces = Vec::new();
-    let original = match r.read(&mut traces) {
-        Ok(v) => v,
-        Err(e) => {
-            r.note("read original", false, e, traces);
-            return false;
-        }
-    };
-    let probe = match r.param.probe(probe, &original) {
-        Ok(p) => p,
-        Err(e) => {
-            r.note("read original", false, format!("bad probe: {e}"), traces);
-            return false;
-        }
-    };
-    let rendered = r.param.render(&original);
-    r.note("read original", true, rendered, traces);
+    true
+}
 
+/// Steps 2–4 and the final snapshot.
+fn run_writes<IO: FeatureIo>(
+    r: &mut Runner<'_, IO>,
+    original: &[u8],
+    probe: &[u8],
+    baseline: &BTreeMap<String, String>,
+) -> bool {
     // Steps 2–4. On any failure, restore and stop.
     let mut ok = true;
     for (name, value) in [
-        ("write same value", &original),
-        ("write probe", &probe),
-        ("restore original", &original),
+        ("write same value", original),
+        ("write probe", probe),
+        ("restore original", original),
     ] {
         match r.write_step(name, value) {
             Ok(true) => {}
@@ -449,7 +568,7 @@ fn run<IO: FeatureIo>(
                 if name != "restore original" {
                     // The outcome of the emergency restore is recorded as
                     // its own step; the run has already failed.
-                    let _ = r.write_step("restore original", &original);
+                    let _ = r.write_step("restore original", original);
                 }
                 break;
             }
@@ -766,6 +885,25 @@ mod tests {
         let last = report.steps.last().unwrap();
         assert_eq!(last.name, "final snapshot");
         assert!(last.note.contains("live.led.scroll_wheel.brightness"));
+    }
+
+    #[test]
+    fn hold_then_finish_restores_and_checks_the_whole_device() {
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        let dpi = Param::Dpi { storage: 0 };
+        let (report, original) = hold(&mut sim, &USB, dpi, "800", &base, FIRST);
+        assert!(report.passed, "{:#?}", report.steps);
+        let original = original.unwrap();
+        assert_eq!(sim.dpi[&0], [0x03, 0x20, 0x03, 0x20]);
+
+        // A reconnect that reverts the live layer.
+        sim.dpi.insert(0, [0x06, 0x40, 0x06, 0x40]);
+        let probe = dpi.probe("800", &original).unwrap();
+        let report = finish_hold(&mut sim, &USB, dpi, &original, &probe, &base, FIRST);
+        assert!(report.passed, "{:#?}", report.steps);
+        assert!(report.steps[0].note.contains("reverted"));
+        assert_eq!(report.steps.last().unwrap().name, "final snapshot");
     }
 
     #[test]
