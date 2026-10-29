@@ -49,7 +49,7 @@
 |---|---|---|---|---|---|---|
 | `00:05` | частота опроса | `01` | `[rate]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
 | `02:0C` | функция кнопки | `0A` | `[storage, slot, hypershift, block×7]` | `ExternalHardware` | `opensnek-naga-side-panels`, `opensnek-naga-default-banks` | Устройство иногда возвращает ошибку, хотя запись прошла. Проверять только чтением. |
-| `04:05` | DPI | `07` | `[storage, x_be16, y_be16, 0, 0]` | `ExternalHardware` | `opensnek-device-support`, `openrazer-mouse`, `snakecharmer-spec` | Источники расходятся по флагу сохранения: OpenRazer всегда шлёт `01`, Snakecharmer — `00`, OpenSnek — `00` для живого слоя. |
+| `04:05` | DPI | `07` | `[storage, x_be16, y_be16, 0, 0]` | `ExternalHardware` | `opensnek-device-support`, `openrazer-mouse`, `snakecharmer-spec` | Наш экземпляр: запись в `storage 0` применяется сразу и сбрасывается при переподключении (`docs/validation/naga-pro/04-05-dpi.md`). Источники расходятся по флагу сохранения: OpenRazer всегда шлёт `01`, Snakecharmer — `00`, OpenSnek — `00` для живого слоя. |
 | `04:06` | стадии DPI | `26` | `[storage, active_id, count, rows]` | `ExternalHardware` | `opensnek-device-support`, `openrazer-mouse` | OpenSnek всегда пишет 5 строк с `count = 5`. |
 | `05:02` | создать профиль | `01` | `[profile]` | `SourceOnly` | `opensnek-crud-spec` | Сбивает DPI и яркость, после него нужна перезапись. |
 | `05:03` | удалить профиль | `01` | `[profile]` | `SourceOnly` | `opensnek-crud-spec` | Только убирает профиль из цикла, данные не стирает. |
