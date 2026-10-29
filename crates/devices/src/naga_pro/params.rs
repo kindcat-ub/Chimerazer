@@ -237,6 +237,23 @@ struct Runner<'a, IO> {
     param: Param,
     mode: WriteMode,
     steps: Vec<Step>,
+    /// At least one write frame went out.
+    wrote: bool,
+}
+
+enum WriteError {
+    /// The write gate refused; no frame was sent.
+    Refused(String),
+    /// A frame was sent and the exchange reported an error.
+    Reported(String),
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused(e) | Self::Reported(e) => f.write_str(e),
+        }
+    }
 }
 
 impl<IO: FeatureIo> Runner<'_, IO> {
@@ -250,7 +267,9 @@ impl<IO: FeatureIo> Runner<'_, IO> {
         self.param.extract(&response.args)
     }
 
-    fn write(&mut self, value: &[u8], traces: &mut Vec<Trace>) -> Result<(), String> {
+    /// Sends one write. `Err(Refused)` means nothing was sent; any other
+    /// error happened on the wire and says nothing about the device state.
+    fn write(&mut self, value: &[u8], traces: &mut Vec<Trace>) -> Result<(), WriteError> {
         let request = write_request(
             self.usb,
             self.param.write_spec(),
@@ -258,35 +277,53 @@ impl<IO: FeatureIo> Runner<'_, IO> {
             &self.param.write_args(value),
             self.mode,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| WriteError::Refused(e.to_string()))?;
+        self.wrote = true;
         let (trace, result) = exchange(self.io, self.usb, &request);
         traces.push(trace);
         match result {
             Ok(_) => Ok(()),
-            Err(ExchangeError::Device(s)) => Err(format!("device returned {s:?}")),
-            Err(e) => Err(e.to_string()),
+            Err(ExchangeError::Device(s)) => Err(WriteError::Reported(format!("{s:?}"))),
+            Err(e) => Err(WriteError::Reported(e.to_string())),
         }
     }
 
-    /// Writes `value`, reads it back and records the step.
-    fn write_step(&mut self, name: &'static str, value: &[u8]) -> bool {
+    /// Writes `value`, reads it back and records the step. The read-back
+    /// decides the outcome: the Naga Pro can report a failed write that
+    /// was applied, so a write error with a matching read-back passes (and
+    /// is noted), and an acknowledged write with a different read-back fails.
+    fn write_step(&mut self, name: &'static str, value: &[u8]) -> Result<bool, String> {
         let mut traces = Vec::new();
         let expected = self.param.render(value);
         let written = self.write(value, &mut traces);
+        if let Err(WriteError::Refused(e)) = written {
+            self.note(
+                name,
+                false,
+                format!("write refused, nothing sent: {e}"),
+                traces,
+            );
+            return Err(e);
+        }
         let read = self.read(&mut traces);
         let (ok, got, note) = match (&written, &read) {
+            (_, Err(r)) => (false, None, format!("read-back failed: {r}")),
             (Ok(()), Ok(v)) if v == value => (true, Some(self.param.render(v)), String::new()),
+            (Err(w), Ok(v)) if v == value => (
+                true,
+                Some(self.param.render(v)),
+                format!("device reported {w}, but the read-back shows the value was applied"),
+            ),
             (Ok(()), Ok(v)) => (
                 false,
                 Some(self.param.render(v)),
-                "read-back differs".into(),
+                "write acknowledged, read-back differs".into(),
             ),
             (Err(w), Ok(v)) => (
                 false,
                 Some(self.param.render(v)),
-                format!("write failed: {w}"),
+                format!("device reported {w}, read-back differs"),
             ),
-            (_, Err(r)) => (false, None, format!("read-back failed: {r}")),
         };
         self.steps.push(Step {
             name,
@@ -296,7 +333,7 @@ impl<IO: FeatureIo> Runner<'_, IO> {
             note,
             traces,
         });
-        ok
+        Ok(ok)
     }
 
     fn note(&mut self, name: &'static str, ok: bool, note: String, traces: Vec<Trace>) {
@@ -330,6 +367,7 @@ pub fn validate(
         param,
         mode,
         steps: Vec::new(),
+        wrote: false,
     };
     let passed = run(&mut r, probe, baseline);
     Report {
@@ -398,17 +436,44 @@ fn run<IO: FeatureIo>(
     r.note("read original", true, rendered, traces);
 
     // Steps 2–4. On any failure, restore and stop.
-    let ok = r.write_step("write same value", &original)
-        && r.write_step("write probe", &probe)
-        && r.write_step("restore original", &original);
-    if !ok {
-        if r.steps.last().map(|s| s.name) != Some("restore original") {
-            r.write_step("restore original", &original);
+    let mut ok = true;
+    for (name, value) in [
+        ("write same value", &original),
+        ("write probe", &probe),
+        ("restore original", &original),
+    ] {
+        match r.write_step(name, value) {
+            Ok(true) => {}
+            Ok(false) => {
+                ok = false;
+                if name != "restore original" {
+                    // The outcome of the emergency restore is recorded as
+                    // its own step; the run has already failed.
+                    let _ = r.write_step("restore original", &original);
+                }
+                break;
+            }
+            Err(_) => {
+                ok = false;
+                break;
+            }
         }
-        return false;
     }
 
-    // Nothing else may have changed.
+    // Whatever happened, if anything was written, the whole device is read
+    // again and compared with the baseline to expose side effects.
+    if r.wrote {
+        let clean = final_snapshot(r, baseline);
+        ok && clean
+    } else {
+        false
+    }
+}
+
+fn final_snapshot<IO: FeatureIo>(
+    r: &mut Runner<'_, IO>,
+    baseline: &BTreeMap<String, String>,
+) -> bool {
     let after = read_snapshot(r.io, r.usb);
     let diffs = compare(baseline, &after.values);
     let errors = baseline_errors(&after.values);
@@ -459,6 +524,8 @@ mod tests {
         ignore_writes: bool,
         /// A write to DPI also changes brightness on storage 0, LED 1.
         side_effect: bool,
+        /// Writes are applied but answered with status Failed.
+        nack_applied_writes: bool,
         reply: Option<[u8; REPORT_LEN]>,
     }
 
@@ -531,7 +598,11 @@ mod tests {
                     _ => {}
                 }
             }
-            out[0] = Status::Ok.to_byte();
+            out[0] = if write && self.nack_applied_writes {
+                Status::Failed.to_byte()
+            } else {
+                Status::Ok.to_byte()
+            };
             out[8..88].copy_from_slice(&args);
             out[88] = crc(&out);
             self.reply = Some(out);
@@ -648,9 +719,34 @@ mod tests {
                 "read original",
                 "write same value",
                 "write probe",
-                "restore original"
+                "restore original",
+                "final snapshot"
             ]
         );
+        // The DPI never changed, so the final snapshot itself is clean.
+        assert!(report.steps.last().unwrap().ok);
+    }
+
+    #[test]
+    fn nacked_but_applied_writes_pass_on_read_back() {
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        sim.nack_applied_writes = true;
+        let report = validate(
+            &mut sim,
+            &USB,
+            Param::Dpi { storage: 0 },
+            "800",
+            &base,
+            FIRST,
+        );
+        assert!(report.passed, "{:#?}", report.steps);
+        let probe = report
+            .steps
+            .iter()
+            .find(|s| s.name == "write probe")
+            .unwrap();
+        assert!(probe.note.contains("Failed"), "{}", probe.note);
     }
 
     #[test]
@@ -680,6 +776,8 @@ mod tests {
         assert!(!report.passed);
         assert!(report.steps.iter().any(|s| s.note.contains("SourceOnly")));
         assert_eq!(sim.poll, 0x01);
+        // Nothing was sent, so no final snapshot is needed.
+        assert!(report.steps.iter().all(|s| s.name != "final snapshot"));
     }
 
     #[test]
