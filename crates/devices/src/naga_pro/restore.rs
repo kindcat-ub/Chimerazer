@@ -93,8 +93,6 @@ pub struct RestoreReport {
     pub remaining: Vec<Difference>,
     /// Dump keys restore may write on this link.
     pub verified_keys: BTreeSet<String>,
-    /// The device state read after the run (empty if refused).
-    pub after: BTreeMap<String, String>,
 }
 
 type Difference = (String, Option<String>, Option<String>);
@@ -375,7 +373,6 @@ pub fn restore(
         .collect();
     let after = read_snapshot(io, usb);
     report.remaining = compare(dump, &after.values);
-    report.after = after.values;
     report
 }
 
