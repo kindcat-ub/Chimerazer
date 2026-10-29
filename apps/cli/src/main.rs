@@ -340,7 +340,12 @@ fn hold(args: &[String]) -> Result<(), String> {
         &probes.join("; "),
         &report,
     );
-    finish_output(log, md, &report, report.param)?;
+    let label = format!("{} value(s): {}", items.len(), probes.join("; "));
+    write_log(log, &md)?;
+    if !report.passed {
+        return Err(format!("FAILED: {label} (see the protocol)"));
+    }
+    eprintln!("PASSED: {label}");
     eprintln!(
         "probes left in place; reconnect the mouse, then run: chimerazer finish {state_path} --baseline {baseline_path}"
     );
@@ -428,7 +433,24 @@ fn finish(args: &[String]) -> Result<(), String> {
         "-",
         &report,
     );
-    finish_output(log, md, &report, report.param)
+    write_log(log, &md)?;
+    let label = format!("{} value(s)", held.len());
+    if report.passed {
+        eprintln!("PASSED: {label}");
+        Ok(())
+    } else {
+        Err(format!("FAILED: {label} (see the protocol)"))
+    }
+}
+
+fn write_log(log: Option<String>, md: &str) -> Result<(), String> {
+    match log {
+        Some(path) => std::fs::write(&path, md).map_err(|e| format!("{path}: {e}")),
+        None => {
+            print!("{md}");
+            Ok(())
+        }
+    }
 }
 
 fn render_report(
