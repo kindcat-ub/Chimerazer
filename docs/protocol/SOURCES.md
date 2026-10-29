@@ -26,3 +26,4 @@
 | `snakecharmer-spec` | Snakecharmer | `docs/SPEC.md`, `docs/ONBOARD-KEYMAP.md` | Расхождения VARSTORE/NOSTORE при записи DPI, подход safety-latch. |
 | `chimerazer-m1-reads` | Chimerazer | `fixtures/naga-pro/our-hardware-frames.txt` | Сырые кадры чтения с нашего экземпляра Naga Pro, провод `008F` и свисток `0090` (M1, 2026-10-28). |
 | `chimerazer-m2-validation` | Chimerazer | `docs/validation/naga-pro/` | Протоколы первичной аппаратной валидации записи на нашем экземпляре Naga Pro. |
+| `chimerazer-m4-hypershift-read` | Chimerazer | у владельца, `~/chimerazer-m4/hypershift.md` | Чтение `02:8C` со слоем `01` и `00` для 30 слотов, storage 0 и 1, наш экземпляр по проводу. |

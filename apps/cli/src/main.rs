@@ -19,7 +19,7 @@ usage:
   chimerazer dump [--pid PID] [--out FILE]
   chimerazer diff <FILE> <FILE>
   chimerazer validate <PARAM> --probe VALUE --baseline DUMP [--storage N]
-                      [--led scroll_wheel|logo] [--pid PID] [--log FILE]
+                      [--led scroll_wheel|logo] [--slot N] [--pid PID] [--log FILE]
                       [--allow-source-only]
   chimerazer hold ITEM.. --baseline DUMP --state FILE [--pid PID] [--log FILE]
   chimerazer finish <STATE> --baseline DUMP [--log FILE]
@@ -34,8 +34,8 @@ usage:
          (no serial number; transport details as `#` comments).
   diff   compares two dumps, ignoring comments and `volatile.*` keys.
   validate  first hardware validation of a write (M2): PARAM is poll-rate,
-         dpi, dpi-stages, brightness or effect (probe RRGGBB for static
-         colour, or spectrum). Refuses to write unless DUMP has no
+         dpi, dpi-stages, brightness, effect (probe RRGGBB for static
+         colour, or spectrum) or button (--slot, probe as for set). Refuses to write unless DUMP has no
          read errors and matches the device. Writes the same value, the
          probe and the original back, reading after each write, then checks
          the whole device against DUMP. --log writes the protocol (markdown).
@@ -213,6 +213,7 @@ fn validate(args: &[String]) -> Result<(), String> {
     let (name, rest) = args.split_first().ok_or(USAGE)?;
     let (mut probe, mut baseline, mut log, mut pid) = (None, None, None, None);
     let (mut storage, mut led, mut allow_source_only) = (naga_pro::LIVE_STORAGE, None, false);
+    let mut slot = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().ok_or(format!("{a} needs a value"));
@@ -235,13 +236,21 @@ fn validate(args: &[String]) -> Result<(), String> {
                     other => return Err(format!("unknown LED {other}")),
                 })
             }
+            "--slot" => {
+                let v = value()?;
+                slot = Some(v.parse::<u8>().map_err(|_| format!("bad slot {v}"))?);
+            }
             "--allow-source-only" => allow_source_only = true,
             other => return Err(format!("unexpected argument {other}\n{USAGE}")),
         }
     }
     let probe = probe.ok_or("--probe is required")?;
     let baseline_path = baseline.ok_or("--baseline is required (a dump taken just before)")?;
-    let param = Param::parse(name, storage, led)?;
+    let param = match (name.as_str(), slot) {
+        ("button", Some(slot)) => Param::button(storage, slot)?,
+        ("button", None) => return Err("button needs --slot N".into()),
+        _ => Param::parse(name, storage, led)?,
+    };
 
     let (hid, model, usb) = select(pid)?;
     if *model != naga_pro::MODEL {
