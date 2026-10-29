@@ -99,15 +99,84 @@ pub struct CommandSpec {
 /// A request could not be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestError {
-    /// The command is not a read; writes are not implemented yet.
+    /// A read was requested with a write command.
     NotARead(Command),
+    /// A write was requested with a read command.
+    NotAWrite(Command),
+    /// The write gate refused the command in this mode.
+    WriteRefused {
+        command: Command,
+        reason: &'static str,
+    },
     Args(ArgsTooLong),
+}
+
+/// How a write is being performed (`docs/ARCHITECTURE.md`, "Первичная
+/// аппаратная валидация записи").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteMode {
+    /// Regular operation: only commands verified on our hardware.
+    Normal,
+    /// First hardware validation of a command that is not yet verified.
+    FirstValidation {
+        /// The project owner explicitly allowed this `SourceOnly` command.
+        allow_source_only: bool,
+    },
+}
+
+/// The write gate. `write` is the write command, `read` the command that
+/// reads the same value back; both must be catalogued.
+pub fn write_request(
+    usb: &UsbId,
+    write: &CommandSpec,
+    read: &CommandSpec,
+    args: &[u8],
+    mode: WriteMode,
+) -> Result<Request, RequestError> {
+    let refuse = |reason| {
+        Err(RequestError::WriteRefused {
+            command: write.command,
+            reason,
+        })
+    };
+    if write.command.is_read() {
+        return Err(RequestError::NotAWrite(write.command));
+    }
+    if !read.command.is_read() {
+        return Err(RequestError::NotARead(read.command));
+    }
+    match (mode, write.confirmation) {
+        (_, Confirmation::OurHardware) => {}
+        (WriteMode::Normal, _) => {
+            return refuse("not verified on our hardware; use first validation");
+        }
+        (WriteMode::FirstValidation { .. }, _)
+            if read.confirmation != Confirmation::OurHardware =>
+        {
+            return refuse("its read-back command is not verified on our hardware");
+        }
+        (WriteMode::FirstValidation { .. }, Confirmation::ExternalHardware) => {}
+        (
+            WriteMode::FirstValidation {
+                allow_source_only: true,
+            },
+            Confirmation::SourceOnly,
+        ) => {}
+        (WriteMode::FirstValidation { .. }, Confirmation::SourceOnly) => {
+            return refuse("SourceOnly needs the owner's explicit permission");
+        }
+    }
+    Request::new(usb.transaction_id, write.command, args).map_err(RequestError::Args)
 }
 
 impl fmt::Display for RequestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotARead(c) => write!(f, "{c} is not a read command"),
+            Self::NotAWrite(c) => write!(f, "{c} is not a write command"),
+            Self::WriteRefused { command, reason } => {
+                write!(f, "write {command} refused: {reason}")
+            }
             Self::Args(e) => e.fmt(f),
         }
     }
@@ -141,6 +210,53 @@ mod tests {
         assert_eq!(model.name, naga_pro::MODEL.name);
         assert_eq!(usb.link, Link::Receiver);
         assert!(lookup(0x0092).is_none());
+    }
+
+    const SPEC: fn(u8, u8, Confirmation) -> CommandSpec = |class, id, confirmation| CommandSpec {
+        command: Command::new(class, id, 1),
+        name: "test",
+        confirmation,
+        sources: &["test"],
+    };
+
+    #[test]
+    fn write_gate() {
+        use Confirmation::*;
+        let usb = &naga_pro::USB_IDS[0];
+        let first = WriteMode::FirstValidation {
+            allow_source_only: false,
+        };
+        let owner_ok = WriteMode::FirstValidation {
+            allow_source_only: true,
+        };
+        let read_ok = SPEC(0x04, 0x85, OurHardware);
+        let read_ext = SPEC(0x04, 0x85, ExternalHardware);
+        let ok = |w, r, m| write_request(usb, &w, &r, &[0], m).is_ok();
+
+        assert!(ok(
+            SPEC(0x04, 0x05, OurHardware),
+            read_ok,
+            WriteMode::Normal
+        ));
+        assert!(!ok(
+            SPEC(0x04, 0x05, ExternalHardware),
+            read_ok,
+            WriteMode::Normal
+        ));
+        assert!(ok(SPEC(0x04, 0x05, ExternalHardware), read_ok, first));
+        assert!(!ok(SPEC(0x04, 0x05, ExternalHardware), read_ext, first));
+        assert!(!ok(SPEC(0x04, 0x05, SourceOnly), read_ok, first));
+        assert!(ok(SPEC(0x04, 0x05, SourceOnly), read_ok, owner_ok));
+        assert!(!ok(
+            SPEC(0x04, 0x85, OurHardware),
+            read_ok,
+            WriteMode::Normal
+        ));
+        assert!(!ok(
+            SPEC(0x04, 0x05, OurHardware),
+            SPEC(0x04, 0x05, OurHardware),
+            WriteMode::Normal
+        ));
     }
 
     #[test]

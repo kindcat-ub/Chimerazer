@@ -18,13 +18,21 @@ usage:
   chimerazer read <CC:II> [ARG..] [--pid PID] [--txn XX]
   chimerazer dump [--pid PID] [--out FILE]
   chimerazer diff <FILE> <FILE>
+  chimerazer validate <PARAM> --probe VALUE --baseline DUMP [--storage N]
+                      [--led scroll_wheel|logo] [--pid PID] [--log FILE]
+                      [--allow-source-only]
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
          --txn overrides the product's transaction ID (protocol research).
   dump   reads everything readable into normalized `key = value` lines
          (no serial number; transport details as `#` comments).
-  diff   compares two dumps, ignoring comments and `volatile.*` keys.";
+  diff   compares two dumps, ignoring comments and `volatile.*` keys.
+  validate  first hardware validation of a write (M2): PARAM is poll-rate,
+         dpi, dpi-stages or brightness. Refuses to write unless DUMP has no
+         read errors and matches the device. Writes the same value, the
+         probe and the original back, reading after each write, then checks
+         the whole device against DUMP. --log writes the protocol (markdown).";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,6 +41,7 @@ fn main() -> ExitCode {
         Some("read") => read(&args[1..]),
         Some("dump") => dump(&args[1..]),
         Some("diff") => diff(&args[1..]),
+        Some("validate") => validate(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -163,6 +172,114 @@ fn dump(args: &[String]) -> Result<(), String> {
         snapshot.traces.len()
     );
     Ok(())
+}
+
+fn validate(args: &[String]) -> Result<(), String> {
+    use naga_pro::params::{Param, validate as run};
+
+    let (name, rest) = args.split_first().ok_or(USAGE)?;
+    let (mut probe, mut baseline, mut log, mut pid) = (None, None, None, None);
+    let (mut storage, mut led, mut allow_source_only) = (naga_pro::LIVE_STORAGE, None, false);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        let mut value = || it.next().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--probe" => probe = Some(value()?.clone()),
+            "--baseline" => baseline = Some(value()?.clone()),
+            "--log" => log = Some(value()?.clone()),
+            "--pid" => {
+                let v = value()?;
+                pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
+            "--storage" => {
+                let v = value()?;
+                storage = v.parse().map_err(|_| format!("bad storage {v}"))?;
+            }
+            "--led" => {
+                led = Some(match value()?.as_str() {
+                    "scroll_wheel" => naga_pro::LED_SCROLL_WHEEL,
+                    "logo" => naga_pro::LED_LOGO,
+                    other => return Err(format!("unknown LED {other}")),
+                })
+            }
+            "--allow-source-only" => allow_source_only = true,
+            other => return Err(format!("unexpected argument {other}\n{USAGE}")),
+        }
+    }
+    let probe = probe.ok_or("--probe is required")?;
+    let baseline_path = baseline.ok_or("--baseline is required (a dump taken just before)")?;
+    let param = Param::parse(name, storage, led)?;
+
+    let (hid, model, usb) = select(pid)?;
+    if *model != naga_pro::MODEL {
+        return Err(format!("validate is not implemented for {}", model.name));
+    }
+    let baseline_text =
+        std::fs::read_to_string(&baseline_path).map_err(|e| format!("{baseline_path}: {e}"))?;
+    if !baseline_text
+        .lines()
+        .any(|l| l == format!("# model {}", model.name))
+    {
+        return Err(format!("{baseline_path} is not a {} dump", model.name));
+    }
+    let baseline = naga_pro::state::parse_text(&baseline_text);
+
+    let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
+    let mode = chimerazer_devices::WriteMode::FirstValidation { allow_source_only };
+    let report = run(&mut dev, usb, param, &probe, &baseline, mode);
+
+    let write = param.write_spec();
+    let mut md = format!(
+        "# Validation: {param}\n\n- model: {}\n- device: 1532:{:04x} {:?}\n- firmware: {}\n- write: `{}` {} [{}]\n- read-back: `{}` {}\n- probe: `{probe}`\n- result: **{}**\n\n## Steps\n",
+        model.name,
+        usb.product_id,
+        usb.link,
+        baseline.get("device.firmware").map_or("?", String::as_str),
+        write.command,
+        write.name,
+        write.confirmation.label(),
+        param.read_spec().command,
+        param.read_spec().name,
+        if report.passed { "PASSED" } else { "FAILED" },
+    );
+    for (i, step) in report.steps.iter().enumerate() {
+        md.push_str(&format!(
+            "\n### {}. {} — {}\n\n",
+            i + 1,
+            step.name,
+            if step.ok { "ok" } else { "FAILED" }
+        ));
+        if let Some(e) = &step.expected {
+            md.push_str(&format!("- expected: `{e}`\n"));
+        }
+        if let Some(g) = &step.got {
+            md.push_str(&format!("- read back: `{g}`\n"));
+        }
+        if !step.note.is_empty() {
+            md.push_str(&format!("- note: {}\n", step.note));
+        }
+        // Snapshots are summarised; their hundreds of frames are not logged.
+        if !step.traces.is_empty() && step.traces.len() <= 4 {
+            md.push_str("\n```\n");
+            for t in &step.traces {
+                md.push_str(&format!("> {}\n", hex(&t.request)));
+                for r in &t.responses {
+                    md.push_str(&format!("< {}\n", hex(r)));
+                }
+            }
+            md.push_str("```\n");
+        }
+    }
+    match log {
+        Some(path) => std::fs::write(&path, &md).map_err(|e| format!("{path}: {e}"))?,
+        None => print!("{md}"),
+    }
+    if report.passed {
+        eprintln!("PASSED: {param}");
+        Ok(())
+    } else {
+        Err(format!("FAILED: {param} (see the protocol)"))
+    }
 }
 
 fn diff(args: &[String]) -> Result<(), String> {
