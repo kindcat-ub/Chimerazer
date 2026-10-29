@@ -24,6 +24,7 @@ usage:
   chimerazer hold ITEM.. --baseline DUMP --state FILE [--pid PID] [--log FILE]
   chimerazer finish <STATE> --baseline DUMP [--log FILE]
   chimerazer restore <DUMP> [--dry-run] [--pid PID] [--log FILE]
+  chimerazer set ITEM.. [--pid PID]
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
@@ -49,7 +50,10 @@ usage:
          the run if it differs. Refuses a DUMP with read errors or another active profile.
          One value at a time, read back after each; no atomicity: a failure
          stops the run and leaves earlier values written. --dry-run only
-         reports what would change.";
+         reports what would change.
+  set    writes values in normal mode (ITEM as for hold, e.g. dpi:1:800,
+         effect:1:logo:ff00ff); only writes verified on this link, each
+         read back. Stops at the first failure.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -62,6 +66,7 @@ fn main() -> ExitCode {
         Some("hold") => hold(&args[1..]),
         Some("finish") => finish(&args[1..]),
         Some("restore") => restore(&args[1..]),
+        Some("set") => set(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -606,6 +611,43 @@ fn restore(args: &[String]) -> Result<(), String> {
         }
         None => Err(format!("FAILED: {summary}")),
     }
+}
+
+fn set(args: &[String]) -> Result<(), String> {
+    use naga_pro::restore::Outcome;
+
+    let (mut pid, mut items) = (None, Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pid" => {
+                let v = it.next().ok_or("--pid needs a value")?;
+                pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
+            item => items.push(parse_item(item)?),
+        }
+    }
+    if items.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let (hid, model, usb) = select(pid)?;
+    if *model != naga_pro::MODEL {
+        return Err(format!("set is not implemented for {}", model.name));
+    }
+    let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
+    for (param, text) in items {
+        let e = naga_pro::restore::set(&mut dev, usb, param, &text);
+        println!(
+            "{param}: {} -> {}: {}",
+            e.before.as_deref().unwrap_or("-"),
+            e.after.as_deref().unwrap_or("-"),
+            e.outcome
+        );
+        if !matches!(e.outcome, Outcome::Restored { .. } | Outcome::Unchanged) {
+            return Err(format!("stopped at {param}"));
+        }
+    }
+    Ok(())
 }
 
 fn write_log(log: Option<String>, md: &str) -> Result<(), String> {

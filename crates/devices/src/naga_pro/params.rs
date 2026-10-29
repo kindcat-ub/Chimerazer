@@ -346,6 +346,17 @@ impl Param {
     /// Builds a probe value from text, relative to the current `original`.
     /// Probes stay inside documented ranges and must differ from `original`.
     pub fn probe(&self, text: &str, original: &[u8]) -> Result<Vec<u8>, String> {
+        let value = self.value(text, original)?;
+        if value == original {
+            return Err("probe equals the current value; choose a different one".into());
+        }
+        Ok(value)
+    }
+
+    /// Builds a value from text (the forms [`Param::probe`] accepts),
+    /// relative to the `current` value, inside documented ranges.
+    pub fn value(&self, text: &str, current: &[u8]) -> Result<Vec<u8>, String> {
+        let original = current;
         let value = match self {
             Self::PollRate => match text {
                 "1000" => vec![0x01],
@@ -398,9 +409,6 @@ impl Param {
                 v
             }
         };
-        if value == original {
-            return Err("probe equals the current value; choose a different one".into());
-        }
         Ok(value)
     }
 }

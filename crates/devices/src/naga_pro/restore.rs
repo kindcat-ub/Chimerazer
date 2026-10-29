@@ -1,4 +1,5 @@
-//! Restore of verified values from a dump.
+//! Normal-mode writes: one value ([`set`]) or the values of a dump
+//! ([`restore`]).
 //!
 //! Only values whose write is `OurHardware` and inside [`VERIFIED_WRITES`]
 //! for the current link are written. Values are applied one at a time; the
@@ -139,6 +140,99 @@ fn read_value(
     param.extract(&response.args)
 }
 
+/// Writes `value` (already checked with [`Param::verified_for`]) in normal
+/// mode and reads it back; the read-back decides `entry.outcome`.
+fn write_verified(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    param: Param,
+    value: &[u8],
+    entry: &mut Entry,
+) {
+    let mode = WriteMode::Normal {
+        scopes: VERIFIED_WRITES,
+    };
+    let Some(spec) = param.write_spec_for(value) else {
+        entry.outcome = Outcome::Failed("value cannot be written, nothing sent".into());
+        return;
+    };
+    let written = match write_request(usb, spec, param.read_spec(), &param.write_args(value), mode)
+    {
+        Ok(request) => {
+            let (trace, result) = exchange(io, usb, &request);
+            entry.traces.push(trace);
+            result.map(|_| ()).map_err(|e| match e {
+                ExchangeError::Device(s) => format!("device reported {s:?}"),
+                other => other.to_string(),
+            })
+        }
+        Err(e) => {
+            entry.outcome = Outcome::Failed(format!("write refused, nothing sent: {e}"));
+            return;
+        }
+    };
+    match read_value(io, usb, param, &mut entry.traces) {
+        Ok(after) => {
+            entry.after = Some(param.render(&after));
+            entry.outcome = match (after == value, written) {
+                (true, Ok(())) => Outcome::Restored {
+                    note: String::new(),
+                },
+                (true, Err(w)) => Outcome::Restored {
+                    note: format!("{w}, read-back shows the value applied"),
+                },
+                (false, Ok(())) => Outcome::Failed("read-back differs".into()),
+                (false, Err(w)) => Outcome::Failed(format!("{w}, read-back differs")),
+            };
+        }
+        Err(e) => entry.outcome = Outcome::Failed(format!("read-back: {e}")),
+    }
+}
+
+/// Reads `param`, builds the new value from `text` ([`Param::value`]) and,
+/// if it differs and its write is verified on this link, writes it and
+/// reads it back. `Restored` in the result means written and confirmed.
+pub fn set(io: &mut impl FeatureIo, usb: &UsbId, param: Param, text: &str) -> Entry {
+    let mut entry = Entry {
+        param,
+        key: param.dump_key(),
+        target: None,
+        before: None,
+        after: None,
+        outcome: Outcome::NotAttempted,
+        traces: Vec::new(),
+    };
+    let before = match read_value(io, usb, param, &mut entry.traces) {
+        Ok(v) => v,
+        Err(e) => {
+            entry.outcome = Outcome::Failed(format!("read: {e}"));
+            return entry;
+        }
+    };
+    entry.before = Some(param.render(&before));
+    let value = match param.value(text, &before) {
+        Ok(v) => v,
+        Err(e) => {
+            entry.outcome = Outcome::Skipped(e);
+            return entry;
+        }
+    };
+    entry.target = Some(param.render(&value));
+    if value == before {
+        entry.after = entry.before.clone();
+        entry.outcome = Outcome::Unchanged;
+    } else if !param.verified_for(usb.link, &value) {
+        entry.outcome = Outcome::Skipped(format!(
+            "writing {} is not verified for {:?}",
+            param.render(&value),
+            usb.link
+        ));
+    } else {
+        write_verified(io, usb, param, &value, &mut entry);
+    }
+    entry
+}
+
 /// Restores verified values of `dump` (a parsed `chimerazer dump` of this
 /// model) on the device. With `dry_run` nothing is written: the report
 /// shows what would be restored.
@@ -267,51 +361,7 @@ pub fn restore(
             continue;
         }
 
-        let mode = WriteMode::Normal {
-            scopes: VERIFIED_WRITES,
-        };
-        let spec = param
-            .write_spec_for(&target)
-            .expect("verified_for checked the write command");
-        let written = match write_request(
-            usb,
-            spec,
-            param.read_spec(),
-            &param.write_args(&target),
-            mode,
-        ) {
-            Ok(request) => {
-                let (trace, result) = exchange(io, usb, &request);
-                entry.traces.push(trace);
-                result.map(|_| ()).map_err(|e| match e {
-                    ExchangeError::Device(s) => format!("device reported {s:?}"),
-                    other => other.to_string(),
-                })
-            }
-            Err(e) => {
-                entry.outcome = Outcome::Failed(format!("write refused, nothing sent: {e}"));
-                failed = true;
-                report.entries.push(entry);
-                continue;
-            }
-        };
-        // The read-back decides, as in validation.
-        match read_value(io, usb, param, &mut entry.traces) {
-            Ok(after) => {
-                entry.after = Some(param.render(&after));
-                entry.outcome = match (after == target, written) {
-                    (true, Ok(())) => Outcome::Restored {
-                        note: String::new(),
-                    },
-                    (true, Err(w)) => Outcome::Restored {
-                        note: format!("{w}, read-back shows the value applied"),
-                    },
-                    (false, Ok(())) => Outcome::Failed("read-back differs".into()),
-                    (false, Err(w)) => Outcome::Failed(format!("{w}, read-back differs")),
-                };
-            }
-            Err(e) => entry.outcome = Outcome::Failed(format!("read-back: {e}")),
-        }
+        write_verified(io, usb, param, &target, &mut entry);
         failed |= matches!(entry.outcome, Outcome::Failed(_));
         report.entries.push(entry);
     }
@@ -425,6 +475,37 @@ mod tests {
             .find(|e| e.key == "p1.led.logo.effect")
             .unwrap();
         assert_eq!(e.traces[1].request[5], 0x09);
+    }
+
+    #[test]
+    fn set_writes_only_verified_values() {
+        let mut sim = Sim::new();
+        let p1_logo = Param::Effect {
+            storage: 1,
+            led: LED_LOGO,
+        };
+        let e = set(&mut sim, &WIRED, p1_logo, "ff00ff");
+        assert!(matches!(e.outcome, Outcome::Restored { .. }), "{e:?}");
+        assert_eq!(e.after.as_deref(), Some("static #ff00ff"));
+
+        let e = set(&mut sim, &WIRED, p1_logo, "ff00ff");
+        assert_eq!(e.outcome, Outcome::Unchanged);
+        assert_eq!(e.traces.len(), 1);
+
+        // Spectrum into profile 1 is not verified: nothing is sent.
+        let e = set(&mut sim, &WIRED, p1_logo, "spectrum");
+        assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
+        assert_eq!(e.traces.len(), 1);
+        assert_eq!(sim.effect[&(1, LED_LOGO)][0], 1);
+
+        // Through the receiver only profile values and live DPI.
+        let e = set(&mut sim, &RECEIVER, Param::Dpi { storage: 1 }, "800");
+        assert!(matches!(e.outcome, Outcome::Restored { .. }), "{e:?}");
+        let e = set(&mut sim, &RECEIVER, p1_logo, "00ff00");
+        assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
+
+        let e = set(&mut sim, &WIRED, Param::Dpi { storage: 1 }, "50");
+        assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
     }
 
     #[test]
