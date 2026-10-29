@@ -6,7 +6,8 @@
 //! its form and encodes back to the same bytes. Anything not recognised is
 //! kept as raw bytes. Sources: `opensnek-naga-default-banks`,
 //! `opensnek-naga-side-panels`, `opensnek-naga-button-encoding` and our
-//! own reads (`chimerazer-m1-reads`).
+//! own reads (`chimerazer-m1-reads`). HyperShift: `opensynapse-obm` and
+//! `chimerazer-m4-hypershift-write` (facts and hardware validation).
 
 use std::fmt;
 
@@ -29,6 +30,8 @@ pub enum Binding {
     Dpi { action: u8 },
     /// `07 01 04`: cycle onboard profiles.
     ProfileCycle,
+    /// `0c 01 01`: hold to activate the secondary layer.
+    Hypershift,
     /// Any other block, kept byte for byte.
     Raw(Block),
 }
@@ -61,6 +64,7 @@ impl Binding {
             },
             [0x06, 0x01, action, 0, 0, 0, 0] => Self::Dpi { action },
             [0x07, 0x01, 0x04, 0, 0, 0, 0] => Self::ProfileCycle,
+            [0x0c, 1, 1, 0, 0, 0, 0] => Self::Hypershift,
             raw => Self::Raw(raw),
         }
     }
@@ -91,6 +95,7 @@ impl Binding {
             }
             Self::Dpi { action } => [0x06, 0x01, action, 0, 0, 0, 0],
             Self::ProfileCycle => [0x07, 0x01, 0x04, 0, 0, 0, 0],
+            Self::Hypershift => [0x0c, 1, 1, 0, 0, 0, 0],
             Self::Raw(b) => b,
         }
     }
@@ -109,6 +114,7 @@ impl Binding {
         match (kind, turbo) {
             ("disabled", None) => Ok(Self::Disabled),
             ("profile-cycle", None) => Ok(Self::ProfileCycle),
+            ("hypershift", None) => Ok(Self::Hypershift),
             ("dpi", None) => Ok(Self::Dpi {
                 action: match arg {
                     "down" => 0x01,
@@ -153,7 +159,7 @@ impl Binding {
             }
             _ => Err(format!(
                 "unknown binding {text} (disabled, mouse:<button>, key:<mods+key>, \
-                 dpi:<down|up|cycle>, profile-cycle, raw:<14 hex>; turbo=<rate> after mouse/key)"
+                 dpi:<down|up|cycle>, profile-cycle, hypershift, raw:<14 hex>; turbo=<rate> after mouse/key)"
             )),
         }
     }
@@ -325,6 +331,7 @@ impl fmt::Display for Binding {
                 a => write!(f, "dpi:0x{a:02x}"),
             },
             Self::ProfileCycle => write!(f, "profile-cycle"),
+            Self::Hypershift => write!(f, "hypershift"),
             Self::Raw(b) => {
                 write!(f, "raw:")?;
                 b.iter().try_for_each(|x| write!(f, "{x:02x}"))
@@ -346,6 +353,7 @@ mod tests {
         ([0x06, 0x01, 0x01, 0, 0, 0, 0], "dpi:down"),
         ([0x06, 0x01, 0x02, 0, 0, 0, 0], "dpi:up"),
         ([0x07, 0x01, 0x04, 0, 0, 0, 0], "profile-cycle"),
+        ([0x0c, 1, 1, 0, 0, 0, 0], "hypershift"),
         (
             [0x0E, 0x03, 0x09, 0x00, 0x64, 0, 0],
             "mouse:scroll-up turbo=100",

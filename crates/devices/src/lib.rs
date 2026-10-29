@@ -114,19 +114,21 @@ pub enum RequestError {
 /// One combination of write command, link and storage that has passed the
 /// first hardware validation. `storage` is the first argument of the write;
 /// `None` for commands without a storage argument.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct WriteScope {
     pub command: Command,
     pub link: Link,
     pub storage: Option<u8>,
+    /// Additional argument restrictions for commands with partially verified payloads.
+    pub accepts: Option<fn(&[u8]) -> bool>,
 }
 
 /// How a write is being performed (`docs/ARCHITECTURE.md`, "Первичная
 /// аппаратная валидация записи").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum WriteMode {
     /// Regular operation: an `OurHardware` command, and only in one of the
-    /// verified `scopes` (command, link, storage).
+    /// verified `scopes` (command, link, storage and optional argument predicate).
     Normal { scopes: &'static [WriteScope] },
     /// First hardware validation of a command that is not yet verified.
     FirstValidation {
@@ -162,6 +164,7 @@ pub fn write_request(
                 s.command == write.command
                     && s.link == usb.link
                     && s.storage.is_none_or(|st| args.first() == Some(&st))
+                    && s.accepts.is_none_or(|accepts| accepts(args))
             });
             if !in_scope {
                 return refuse("this link/storage combination is not verified");
@@ -249,6 +252,7 @@ mod tests {
             command: Command::new(0x04, 0x05, 1),
             link: Link::Wired,
             storage: Some(1),
+            accepts: None,
         }];
         let normal = WriteMode::Normal { scopes: SCOPES };
         let first = WriteMode::FirstValidation {

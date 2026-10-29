@@ -37,6 +37,8 @@ pub struct Sim {
     pub ignore_hypershift_writes: bool,
     /// Layer-1 reads fail (used to check that preservation is prepared first).
     pub reject_hypershift_reads: bool,
+    pub active_profile: u8,
+    pub hypershift_write_hits_primary: bool,
     pub poll: u8,
     pub ignore_writes: bool,
     /// A write to DPI also changes brightness on storage 0, LED 1.
@@ -50,6 +52,7 @@ impl Sim {
     pub fn new() -> Self {
         let mut s = Self {
             poll: 0x01,
+            active_profile: 1,
             ..Self::default()
         };
         for st in 0..=5 {
@@ -114,6 +117,9 @@ impl FeatureIo for Sim {
                     self.buttons.get_mut(&(a[0], a[1])).unwrap().0 = a[2];
                     if a[2] == 1 {
                         self.hypershift.insert((a[0], a[1]), block);
+                        if self.hypershift_write_hits_primary {
+                            self.buttons.get_mut(&(a[0], a[1])).unwrap().1 = [0; 7];
+                        }
                     } else {
                         self.buttons.get_mut(&(a[0], a[1])).unwrap().1 = block;
                         if self.button_write_hits_hypershift {
@@ -155,6 +161,7 @@ impl FeatureIo for Sim {
                         args[1 + i] = s.id;
                     }
                 }
+                (0x05, 0x84) => args[0] = self.active_profile,
                 (0x05, 0x81) => args[..5].copy_from_slice(&[5, 1, 2, 3, 4]),
                 (0x00, 0x81) => args[..2].copy_from_slice(&[2, 3]),
                 _ => {}

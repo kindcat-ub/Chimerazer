@@ -62,7 +62,7 @@ usage:
          Buttons: button:<storage>:<slot>:<binding>, binding is disabled,
          mouse:<left|right|middle|back|forward|scroll-up|scroll-down>,
          key:[mods+]<key> (ctrl shift alt super, r-prefixed for right),
-         dpi:<down|up|cycle>, profile-cycle or raw:<14 hex>; turbo=<rate>
+         dpi:<down|up|cycle>, profile-cycle, hypershift or raw:<14 hex>; turbo=<rate>
          after mouse/key (key:up,turbo=55 or quoted \"key:up turbo=55\").
   buttons  decodes the 30 button slots of a dump (no device access).
   watch  prints the keys, buttons and wheel events the mouse sends (evdev,

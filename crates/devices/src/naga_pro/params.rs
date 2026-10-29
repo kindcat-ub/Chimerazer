@@ -369,9 +369,14 @@ impl Param {
     }
 
     fn spec_verified(&self, spec: &CommandSpec, link: crate::Link) -> bool {
-        // Writes to the HyperShift layer are not verified on any link.
-        if let Self::Button { layer: 1, .. } = self {
-            return false;
+        if let Self::Button {
+            storage,
+            slot,
+            layer,
+        } = *self
+        {
+            return spec.confirmation == crate::Confirmation::OurHardware
+                && button_param_verified(storage, slot, layer, link);
         }
         spec.confirmation == crate::Confirmation::OurHardware
             && VERIFIED_WRITES.iter().any(|s| {
@@ -392,8 +397,17 @@ impl Param {
     /// Whether writing exactly `value` is verified on `link`: the write
     /// command `value` needs (with its size) must be in scope.
     pub fn verified_for(&self, link: crate::Link, value: &[u8]) -> bool {
-        self.write_spec_for(value)
-            .is_some_and(|spec| self.spec_verified(spec, link))
+        self.write_spec_for(value).is_some_and(|spec| {
+            self.spec_verified(spec, link)
+                && VERIFIED_WRITES.iter().any(|scope| {
+                    scope.command == spec.command
+                        && scope.link == link
+                        && scope.storage == self.storage()
+                        && scope
+                            .accepts
+                            .is_none_or(|accepts| accepts(&self.write_args(value)))
+                })
+        })
     }
 
     /// Human form of a value.
@@ -569,6 +583,45 @@ pub(crate) fn write_value(
         .ok_or_else(|| WriteError::Refused(format!("{param}: value cannot be written")))?;
     let request = write_request(usb, spec, param.read_spec(), &param.write_args(value), mode)
         .map_err(|e| WriteError::Refused(e.to_string()))?;
+    if matches!(mode, WriteMode::Normal { .. }) && matches!(param, Param::Button { .. }) {
+        let active = read_request(usb, &ACTIVE_PROFILE, &[])
+            .map_err(|e| WriteError::Refused(e.to_string()))?;
+        let (trace, result) = exchange(io, usb, &active);
+        traces.push(trace);
+        let response = result.map_err(|e| WriteError::Refused(e.to_string()))?;
+        if response.args[0] != 1 {
+            return Err(WriteError::Refused(
+                "button writes require active profile 1".into(),
+            ));
+        }
+    }
+    let normal_secondary =
+        matches!(mode, WriteMode::Normal { .. }) && matches!(param, Param::Button { layer: 1, .. });
+    let secondary_primary = if normal_secondary {
+        let (flag, _) = read_button(io, usb, param, traces).map_err(WriteError::Refused)?;
+        if flag != 1 {
+            return Err(WriteError::Refused(
+                "secondary write would change the stored flag".into(),
+            ));
+        }
+        let Param::Button { storage, slot, .. } = param else {
+            unreachable!()
+        };
+        let primary = Param::Button {
+            storage,
+            slot,
+            layer: 0,
+        };
+        let (flag, block) = read_button(io, usb, primary, traces).map_err(WriteError::Refused)?;
+        if flag != 1 {
+            return Err(WriteError::Refused(
+                "button flags disagree between layers".into(),
+            ));
+        }
+        Some((primary, block))
+    } else {
+        None
+    };
     let saved = if let Param::Button {
         storage,
         slot,
@@ -591,8 +644,20 @@ pub(crate) fn write_value(
                         "button flags disagree between layers".into(),
                     ));
                 }
-                let repair = write_request(usb, spec, hs.read_spec(), &hs.write_args(&block), mode)
-                    .map_err(|e| WriteError::Refused(e.to_string()))?;
+                let repair_mode = match mode {
+                    WriteMode::Normal { .. } => WriteMode::Normal {
+                        scopes: BUTTON_REPLAY_WRITES,
+                    },
+                    _ => mode,
+                };
+                let repair = write_request(
+                    usb,
+                    spec,
+                    hs.read_spec(),
+                    &hs.write_args(&block),
+                    repair_mode,
+                )
+                .map_err(|e| WriteError::Refused(e.to_string()))?;
                 Some((flag, Some((hs, block, repair))))
             }
             _ => {
@@ -601,6 +666,8 @@ pub(crate) fn write_value(
                 )));
             }
         }
+    } else if normal_secondary {
+        Some((1, None))
     } else {
         None
     };
@@ -610,6 +677,15 @@ pub(crate) fn write_value(
     let mut notes = Vec::new();
     if let Err(e) = result {
         notes.push(e.to_string());
+    }
+    if let Some((primary, block)) = secondary_primary {
+        let (flag, after) =
+            read_button(io, usb, primary, traces).map_err(WriteError::Preservation)?;
+        if flag != 1 || after != block {
+            return Err(WriteError::Preservation(
+                "secondary write changed the primary binding or flag".into(),
+            ));
+        }
     }
     if let Some((flag, repair)) = saved {
         if let Some((hs, block, request)) = repair {
@@ -1607,6 +1683,86 @@ mod tests {
                 .steps
                 .iter()
                 .any(|s| !s.ok && s.note.contains("preservation failed"))
+        );
+    }
+
+    #[test]
+    fn normal_button_gate_checks_the_full_payload() {
+        use crate::Link::{Receiver, Wired};
+        let scope = WriteMode::Normal {
+            scopes: VERIFIED_WRITES,
+        };
+        for link in [Wired, Receiver] {
+            let usb = UsbId { link, ..USB };
+            for storage in 0..=5 {
+                for slot in BUTTON_SLOTS {
+                    for layer in [0, 1] {
+                        let p = Param::button_layer(storage, slot.id, layer).unwrap();
+                        let value = Binding::parse("key:f8").unwrap().encode();
+                        let allowed = storage == 1
+                            && ![9, 10].contains(&slot.id)
+                            && (layer == 0 || (link == Receiver && slot.id == 2));
+                        assert_eq!(p.verified_for(link, &value), allowed, "{p} {link:?}");
+                        assert_eq!(
+                            write_request(
+                                &usb,
+                                &SET_BUTTON_FUNCTION,
+                                &BUTTON_FUNCTION,
+                                &p.write_args(&value),
+                                scope
+                            )
+                            .is_ok(),
+                            allowed
+                        );
+                    }
+                }
+            }
+        }
+        let cases = [
+            (3, 0, "hypershift", true),
+            (4, 0, "hypershift", false),
+            (3, 0, "key:ctrl+shift+f8", true),
+            (3, 0, "key:alt+f8", false),
+            (3, 0, "profile-cycle", true),
+            (5, 0, "profile-cycle", false),
+            (52, 0, "key:f9 turbo=100", true),
+            (52, 0, "key:f9 turbo=99", false),
+            (53, 0, "dpi:cycle", true),
+            (53, 0, "dpi:0xff", false),
+            (2, 1, "key:f8", true),
+            (2, 1, "key:f9", false),
+            (2, 1, "mouse:right", true),
+            (2, 1, "hypershift", false),
+            (3, 0, "disabled", false),
+            (3, 0, "raw:ffffffffffffff", false),
+            (3, 0, "raw:0201001e000000", false),
+            (3, 0, "mouse:0xff", false),
+        ];
+        for (slot, layer, text, allowed) in cases {
+            let p = Param::button_layer(1, slot, layer).unwrap();
+            let value = Binding::parse(text).unwrap().encode();
+            assert_eq!(p.verified_for(Receiver, &value), allowed, "{text}");
+            let usb = UsbId {
+                link: Receiver,
+                ..USB
+            };
+            assert_eq!(
+                write_request(
+                    &usb,
+                    &SET_BUTTON_FUNCTION,
+                    &BUTTON_FUNCTION,
+                    &p.write_args(&value),
+                    scope
+                )
+                .is_ok(),
+                allowed,
+                "wire gate: {text}"
+            );
+        }
+        assert!(
+            !Param::button(1, 3)
+                .unwrap()
+                .verified_for(Wired, &Binding::Hypershift.encode())
         );
     }
 

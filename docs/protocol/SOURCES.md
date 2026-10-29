@@ -31,3 +31,4 @@
 | `chimerazer-m4-hypershift-read` | Chimerazer | у владельца, `~/chimerazer-m4/hypershift.md` | Чтение `02:8C` со слоем `01` и `00` для 30 слотов, storage 0 и 1, наш экземпляр по проводу. |
 | `opensynapse-obm` | OpenSynapse | `src/OpenSynapse.Windows/Protocols/ViperObmProtocol.cs` | `ModeButtonKey = 12`, данные `[1]`; источник кандидата блока включателя HyperShift, затем проверенного на нашей Naga Pro. |
 | `chimerazer-m4-hypershift-write` | Chimerazer | `docs/validation/naga-pro/02-0C-hypershift.md` | Средняя как включатель, F8 на правой во втором слое, сохранение после выключения и полный возврат через ресивер. |
+| `chimerazer-m4-validation` | Chimerazer | `docs/validation/naga-pro/02-0C-*.md` | Запись назначений, сохранение флагов, нажатия, выключение и возврат на нашей Naga Pro; область обычной записи ограничена аргументами. |

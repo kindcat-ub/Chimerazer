@@ -20,7 +20,11 @@ use crate::{Trace, UsbId, WriteMode, exchange, read_request};
 /// Values restore can write, profile storage first: the live layer of the
 /// active profile follows the profile, so it is usually unchanged by then.
 pub fn candidates() -> Vec<Param> {
-    let mut out = Vec::new();
+    let mut out = vec![Param::Button {
+        storage: 1,
+        slot: 2,
+        layer: 1,
+    }];
     for storage in [1, LIVE_STORAGE] {
         out.push(Param::Dpi { storage });
         out.push(Param::DpiStages { storage });
@@ -557,23 +561,27 @@ mod tests {
         assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
     }
 
-    /// Buttons are restore candidates; while `02:0C` is not verified they
-    /// are skipped and reported outside the verified scope.
+    /// Restore writes profile 1 buttons, but leaves direct live writes closed.
     #[test]
-    fn buttons_are_covered_and_skipped_until_verified() {
+    fn button_restore_writes_only_profile_one() {
         let mut sim = Sim::new();
         sim.buttons.get_mut(&(1, 80)).unwrap().0 = 1;
         sim.buttons.get_mut(&(0, 80)).unwrap().0 = 1;
         let dump = read_snapshot(&mut sim, &WIRED).values;
         sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        sim.buttons.get_mut(&(0, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
         let r = restore(&mut sim, &WIRED, &dump, false);
-        assert!(matches!(outcome(&r, "p1.button.80"), Outcome::Skipped(_)));
-        assert_eq!(sim.buttons[&(1, 80)].1[3], 0x46);
+        assert!(matches!(
+            outcome(&r, "p1.button.80"),
+            Outcome::Restored { .. }
+        ));
+        assert!(matches!(outcome(&r, "live.button.80"), Outcome::Skipped(_)));
+        assert_eq!(sim.buttons[&(1, 80)].1[3], 0x1e);
         assert!(r.ok(), "{r:#?}");
         assert!(
             r.outside_scope()
                 .iter()
-                .any(|(k, _, _)| k == "p1.button.80")
+                .any(|(k, _, _)| k == "live.button.80")
         );
         // Profile 1 and live layer-0 bindings are covered; profiles 2-5
         // and the HyperShift layer are not.
@@ -674,6 +682,111 @@ mod tests {
         assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
         assert_eq!(e.before, e.after);
         assert_eq!(sim.buttons[&(1, 64)].0, 0);
+    }
+
+    #[test]
+    fn normal_set_and_restore_preserve_primary_and_secondary_bindings() {
+        let mut sim = Sim::new();
+        for slot in [2, 5] {
+            sim.buttons.get_mut(&(1, slot)).unwrap().0 = 1;
+        }
+        sim.buttons.get_mut(&(1, 3)).unwrap().1 = [1, 1, 3, 0, 0, 0, 0];
+        sim.buttons.get_mut(&(1, 5)).unwrap().1 = [1, 1, 5, 0, 0, 0, 0];
+        sim.hypershift.insert((1, 2), [1, 1, 2, 0, 0, 0, 0]);
+        let dump = read_snapshot(&mut sim, &RECEIVER).values;
+        let hs = sim.hypershift.clone();
+        for (p, value) in [
+            (Param::button_layer(1, 2, 1).unwrap(), "key:f8"),
+            (Param::button(1, 3).unwrap(), "hypershift"),
+            (Param::button(1, 5).unwrap(), "key:q"),
+        ] {
+            let e = set(&mut sim, &RECEIVER, p, value);
+            assert!(matches!(e.outcome, Outcome::Restored { .. }), "{e:?}");
+        }
+        assert_eq!(sim.buttons[&(1, 5)].0, 1);
+        assert_eq!(sim.hypershift[&(1, 5)], hs[&(1, 5)]);
+        let dry = restore(&mut sim, &RECEIVER, &dump, true);
+        assert!(
+            dry.entries
+                .iter()
+                .any(|e| matches!(e.outcome, Outcome::WouldRestore))
+        );
+        assert!(
+            dry.entries
+                .iter()
+                .all(|e| e.traces.iter().all(|t| t.request[7] != 0x0c))
+        );
+        let report = restore(&mut sim, &RECEIVER, &dump, false);
+        assert!(report.ok(), "{report:#?}");
+        assert!(report.remaining.is_empty(), "{:?}", report.remaining);
+        assert_eq!(sim.hypershift, hs);
+    }
+
+    #[test]
+    fn normal_secondary_write_refuses_a_flag_change_before_sending() {
+        let mut sim = Sim::new();
+        let p = Param::button_layer(1, 2, 1).unwrap();
+        let before = sim.hypershift.clone();
+        let e = set(&mut sim, &RECEIVER, p, "key:f8");
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        assert_eq!(sim.hypershift, before);
+        assert_eq!(sim.buttons[&(1, 2)].0, 0);
+    }
+
+    #[test]
+    fn normal_replay_failure_is_fatal_and_unverified_payloads_send_no_write() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 5)).unwrap().0 = 1;
+        sim.ignore_hypershift_writes = true;
+        let e = set(&mut sim, &WIRED, Param::button(1, 5).unwrap(), "key:q");
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        let mut sim = Sim::new();
+        for (p, value) in [
+            (Param::button(0, 3).unwrap(), "key:q"),
+            (Param::button(2, 3).unwrap(), "key:q"),
+            (Param::button(1, 9).unwrap(), "key:q"),
+            (Param::button_layer(1, 3, 1).unwrap(), "key:f8"),
+            (Param::button(1, 3).unwrap(), "raw:ffffffffffffff"),
+        ] {
+            let e = set(&mut sim, &RECEIVER, p, value);
+            assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
+            assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        }
+    }
+
+    #[test]
+    fn inactive_profile_one_is_never_written_in_normal_mode() {
+        let mut sim = Sim::new();
+        sim.active_profile = 2;
+        let dump = read_snapshot(&mut sim, &RECEIVER).values;
+        let e = set(&mut sim, &RECEIVER, Param::button(1, 5).unwrap(), "key:q");
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert!(e.traces.iter().all(|t| t.request[7] != 0x0c));
+        sim.buttons.get_mut(&(1, 5)).unwrap().1 = [2, 2, 0, 0x46, 0, 0, 0];
+        let report = restore(&mut sim, &RECEIVER, &dump, false);
+        assert!(!report.ok(), "{report:#?}");
+        assert!(
+            report
+                .entries
+                .iter()
+                .all(|e| e.traces.iter().all(|t| t.request[7] != 0x0c))
+        );
+    }
+
+    #[test]
+    fn secondary_write_detects_a_primary_side_effect() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(1, 2)).unwrap().0 = 1;
+        sim.hypershift_write_hits_primary = true;
+        let e = set(
+            &mut sim,
+            &RECEIVER,
+            Param::button_layer(1, 2, 1).unwrap(),
+            "key:f8",
+        );
+        assert!(matches!(e.outcome, Outcome::Failed(_)), "{e:?}");
+        assert_eq!(e.after.as_deref(), Some("key:f8"));
     }
 
     #[test]
