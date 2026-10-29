@@ -443,11 +443,18 @@ fn finish(args: &[String]) -> Result<(), String> {
     );
     write_log(log, &md)?;
     let label = format!("{} value(s)", held.len());
+    let persistence = match naga_pro::params::persisted(&report) {
+        Some(true) => "persistence PASSED",
+        Some(false) => "persistence FAILED",
+        None => "persistence not checked",
+    };
     if report.passed {
-        eprintln!("PASSED: {label}");
+        eprintln!("PASSED: {label}, {persistence}");
         Ok(())
     } else {
-        Err(format!("FAILED: {label} (see the protocol)"))
+        Err(format!(
+            "FAILED: {label}, {persistence} (rollback and final diff in the protocol)"
+        ))
     }
 }
 

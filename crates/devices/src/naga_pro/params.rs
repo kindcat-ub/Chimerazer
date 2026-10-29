@@ -598,9 +598,11 @@ pub fn hold(
     (report, Some(held))
 }
 
-/// Persistence check, phase 2 (after a reconnect): for each held parameter
-/// records what the device holds now and restores the original, then
-/// compares the whole device with the baseline taken before phase 1.
+/// Persistence check, phase 2 (after a reconnect): first reads every held
+/// parameter, before any write; each must still hold its probe, otherwise
+/// the check fails (see [`persisted`]). Then restores every original and
+/// compares the whole device with the baseline taken before phase 1. A
+/// clean rollback never turns a lost value into a pass.
 pub fn finish_hold(
     io: &mut impl FeatureIo,
     usb: &UsbId,
@@ -624,26 +626,33 @@ pub fn finish_hold(
         wrote: false,
     };
     let mut passed = true;
+    // Read everything first: no write may touch the device before the
+    // persistence verdict is recorded.
     for h in held {
         r.param = h.param;
         let mut traces = Vec::new();
         match r.read(&mut traces) {
             Ok(now) => {
-                let verdict = if now == h.probe {
+                let survived = now == h.probe;
+                let verdict = if survived {
                     "the probe survived the reconnect"
                 } else if now == h.original {
-                    "the device reverted to the original value"
+                    "NOT PERSISTED: the device reverted to the original value"
                 } else {
-                    "the device holds a third value"
+                    "NOT PERSISTED: the device holds a third value"
                 };
                 let note = format!("after reconnect: {} — {verdict}", h.param.render(&now));
-                r.note("read after reconnect", true, note, traces);
+                r.note(READ_AFTER_RECONNECT, survived, note, traces);
+                passed &= survived;
             }
             Err(e) => {
-                r.note("read after reconnect", false, e, traces);
+                r.note(READ_AFTER_RECONNECT, false, e, traces);
                 passed = false;
             }
         }
+    }
+    for h in held {
+        r.param = h.param;
         passed &= matches!(r.write_step("restore original", &h.original), Ok(true));
     }
     passed &= final_snapshot(&mut r, baseline);
@@ -652,6 +661,20 @@ pub fn finish_hold(
         steps: r.steps,
         passed,
     }
+}
+
+const READ_AFTER_RECONNECT: &str = "read after reconnect";
+
+/// Whether every value read after the reconnect still held its probe
+/// (`None` if `report` is not from [`finish_hold`]).
+pub fn persisted(report: &Report) -> Option<bool> {
+    let mut reads = report
+        .steps
+        .iter()
+        .filter(|s| s.name == READ_AFTER_RECONNECT)
+        .peekable();
+    reads.peek()?;
+    Some(reads.all(|s| s.ok))
 }
 
 /// Refuses a baseline with read errors or one the device no longer matches.
@@ -949,6 +972,45 @@ mod tests {
         assert_eq!(reads.len(), 2);
         assert!(reads.iter().all(|n| n.contains("survived")));
         assert_eq!(report.steps.last().unwrap().name, "final snapshot");
+        assert_eq!(persisted(&report), Some(true));
+        assert_eq!(compare(&base, &baseline(&mut sim)), vec![]);
+    }
+
+    #[test]
+    fn lost_probe_fails_finish_even_after_a_clean_rollback() {
+        let mut sim = Sim::new();
+        let base = baseline(&mut sim);
+        let dpi = Param::Dpi { storage: 1 };
+        let logo = Param::Brightness {
+            storage: 1,
+            led: LED_LOGO,
+        };
+        let (_, held) = hold(&mut sim, &USB, &[(dpi, "800"), (logo, "100")], &base, FIRST);
+        let held = held.unwrap();
+        // The power cycle loses the brightness probe only.
+        sim.brightness.insert((1, LED_LOGO), 51);
+
+        let report = finish_hold(&mut sim, &USB, &held, &base, FIRST);
+        assert!(!report.passed);
+        assert_eq!(persisted(&report), Some(false));
+        // All reads come before the first write.
+        let names: Vec<&str> = report.steps.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "read after reconnect",
+                "read after reconnect",
+                "restore original",
+                "restore original",
+                "final snapshot"
+            ]
+        );
+        // The rollback itself succeeded and the device matches the baseline.
+        assert!(
+            report.steps[2..].iter().all(|s| s.ok),
+            "{:#?}",
+            report.steps
+        );
         assert_eq!(compare(&base, &baseline(&mut sim)), vec![]);
     }
 
