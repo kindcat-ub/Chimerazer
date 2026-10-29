@@ -35,6 +35,12 @@ pub fn candidates() -> Vec<Param> {
         for led in [LED_LOGO, LED_SCROLL_WHEEL] {
             out.push(Param::Effect { storage, led });
         }
+        for slot in BUTTON_SLOTS {
+            out.push(Param::Button {
+                storage,
+                slot: slot.id,
+            });
+        }
     }
     out
 }
@@ -140,18 +146,33 @@ fn read_value(
     param.extract(&response.args)
 }
 
-/// Writes `value` (already checked with [`Param::verified_for`]) in normal
-/// mode and reads it back; the read-back decides `entry.outcome`.
+/// Which writes `set` and `restore` may make. In use it is always
+/// [`NORMAL`]; tests swap it to exercise parameters not yet verified.
+#[derive(Clone, Copy)]
+struct Gate {
+    mode: WriteMode,
+    verified_on: fn(&Param, crate::Link) -> bool,
+    verified_for: fn(&Param, crate::Link, &[u8]) -> bool,
+}
+
+const NORMAL: Gate = Gate {
+    mode: WriteMode::Normal {
+        scopes: VERIFIED_WRITES,
+    },
+    verified_on: Param::verified_on,
+    verified_for: Param::verified_for,
+};
+
+/// Writes `value` (already checked with the gate) and reads it back; the
+/// read-back decides `entry.outcome`.
 fn write_verified(
     io: &mut impl FeatureIo,
     usb: &UsbId,
     param: Param,
     value: &[u8],
     entry: &mut Entry,
+    mode: WriteMode,
 ) {
-    let mode = WriteMode::Normal {
-        scopes: VERIFIED_WRITES,
-    };
     let Some(spec) = param.write_spec_for(value) else {
         entry.outcome = Outcome::Failed("value cannot be written, nothing sent".into());
         return;
@@ -228,7 +249,7 @@ pub fn set(io: &mut impl FeatureIo, usb: &UsbId, param: Param, text: &str) -> En
             usb.link
         ));
     } else {
-        write_verified(io, usb, param, &value, &mut entry);
+        write_verified(io, usb, param, &value, &mut entry, NORMAL.mode);
     }
     entry
 }
@@ -241,6 +262,16 @@ pub fn restore(
     usb: &UsbId,
     dump: &BTreeMap<String, String>,
     dry_run: bool,
+) -> RestoreReport {
+    restore_gated(io, usb, dump, dry_run, NORMAL)
+}
+
+fn restore_gated(
+    io: &mut impl FeatureIo,
+    usb: &UsbId,
+    dump: &BTreeMap<String, String>,
+    dry_run: bool,
+    gate: Gate,
 ) -> RestoreReport {
     let mut report = RestoreReport::default();
     let refuse = |mut r: RestoreReport, why: String| {
@@ -292,7 +323,7 @@ pub fn restore(
     for param in candidates() {
         let key = param.dump_key();
         covered.extend(param.covered_keys());
-        if param.verified_on(usb.link) {
+        if (gate.verified_on)(&param, usb.link) {
             report.verified_keys.extend(param.covered_keys());
         }
         let mut entry = Entry {
@@ -304,7 +335,7 @@ pub fn restore(
             outcome: Outcome::NotAttempted,
             traces: Vec::new(),
         };
-        if !param.verified_on(usb.link) {
+        if !(gate.verified_on)(&param, usb.link) {
             entry.outcome = Outcome::Skipped(format!("write not verified for {:?}", usb.link));
             report.entries.push(entry);
             continue;
@@ -346,7 +377,7 @@ pub fn restore(
         // Some writes of a parameter are verified and others are not (the
         // `0F:02` layouts): the value itself must be writable. A skipped
         // value stays in `verified_keys`, so its difference fails the run.
-        if !param.verified_for(usb.link, &target) {
+        if !(gate.verified_for)(&param, usb.link, &target) {
             entry.outcome = Outcome::Skipped(format!(
                 "writing {} is not verified for {:?}",
                 param.render(&target),
@@ -361,7 +392,7 @@ pub fn restore(
             continue;
         }
 
-        write_verified(io, usb, param, &target, &mut entry);
+        write_verified(io, usb, param, &target, &mut entry, gate.mode);
         failed |= matches!(entry.outcome, Outcome::Failed(_));
         report.entries.push(entry);
     }
@@ -506,6 +537,60 @@ mod tests {
 
         let e = set(&mut sim, &WIRED, Param::Dpi { storage: 1 }, "50");
         assert!(matches!(e.outcome, Outcome::Skipped(_)), "{e:?}");
+    }
+
+    /// Buttons are restore candidates; while `02:0C` is not verified they
+    /// are skipped and reported outside the verified scope.
+    #[test]
+    fn buttons_are_covered_and_skipped_until_verified() {
+        let mut sim = Sim::new();
+        let dump = read_snapshot(&mut sim, &WIRED).values;
+        sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        let r = restore(&mut sim, &WIRED, &dump, false);
+        assert!(matches!(outcome(&r, "p1.button.80"), Outcome::Skipped(_)));
+        assert_eq!(sim.buttons[&(1, 80)].1[3], 0x46);
+        assert!(r.ok(), "{r:#?}");
+        assert!(
+            r.outside_scope()
+                .iter()
+                .any(|(k, _, _)| k == "p1.button.80")
+        );
+        // Profile 1 and live bindings are covered; profiles 2-5 are not.
+        assert!(
+            !r.not_restorable
+                .iter()
+                .any(|k| k.starts_with("p1.button.") || k.starts_with("live.button."))
+        );
+        assert!(r.not_restorable.contains(&"p2.button.80".to_string()));
+    }
+
+    /// Once button writes are allowed, restore puts changed bindings back
+    /// from the dump and leaves the rest untouched.
+    #[test]
+    fn button_bindings_are_restored_from_a_dump() {
+        let mut sim = Sim::new();
+        let dump = read_snapshot(&mut sim, &WIRED).values;
+        sim.buttons.get_mut(&(1, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        sim.buttons.get_mut(&(1, 85)).unwrap().1 = [0x0D, 0x04, 0, 0x52, 0, 0x37, 0];
+        sim.buttons.get_mut(&(0, 80)).unwrap().1 = [0x02, 0x02, 0, 0x46, 0, 0, 0];
+        let trusted = Gate {
+            mode: WriteMode::FirstValidation {
+                allow_source_only: false,
+            },
+            verified_on: |_, _| true,
+            verified_for: |_, _, _| true,
+        };
+        let r = restore_gated(&mut sim, &WIRED, &dump, false, trusted);
+        assert!(r.ok(), "{r:#?}");
+        for key in ["p1.button.80", "p1.button.85", "live.button.80"] {
+            assert!(
+                matches!(outcome(&r, key), Outcome::Restored { .. }),
+                "{key}"
+            );
+        }
+        assert_eq!(*outcome(&r, "p1.button.64"), Outcome::Unchanged);
+        assert_eq!(sim.buttons[&(1, 85)].1, [0x02, 0x02, 0, 0x1E, 0, 0, 0]);
+        assert!(r.remaining.is_empty(), "{:?}", r.remaining);
     }
 
     #[test]
