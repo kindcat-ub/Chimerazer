@@ -23,3 +23,4 @@
 | `openrazer-common` | OpenRazer | `driver/razercommon.h`, `driver/razercommon.c` | Структура репорта, CRC, статусы, параметры SET_REPORT/GET_REPORT. |
 | `openrazer-mouse` | OpenRazer | `driver/razermouse_driver.c`, `driver/razermouse_driver.h`, `driver/razerchromacommon.c` | Возможности Naga Pro, PID, интерфейс, transaction id, задержки ответа. |
 | `snakecharmer-spec` | Snakecharmer | `docs/SPEC.md`, `docs/ONBOARD-KEYMAP.md` | Расхождения VARSTORE/NOSTORE при записи DPI, подход safety-latch. |
+| `chimerazer-m1-reads` | Chimerazer | `fixtures/naga-pro/our-hardware-frames.txt` | Сырые кадры чтения с нашего экземпляра Naga Pro, провод `008F` и свисток `0090` (M1, 2026-10-28). |

@@ -4,28 +4,37 @@
 //! OpenRazer; see `docs/protocol/naga-pro.md` for the provenance of every
 //! command.
 
+pub mod state;
+
 use std::fmt;
+use std::time::Duration;
 
 use chimerazer_protocol::{ARGS_LEN, Command};
 
-use crate::{CommandSpec, Confirmation, Link, UsbId};
+use crate::{CommandSpec, Confirmation, Link, Model, UsbId};
 
-pub const MODEL: &str = "Razer Naga Pro";
+pub const MODEL: Model = Model {
+    name: "Razer Naga Pro",
+    usb_ids: &USB_IDS,
+    commands: COMMANDS,
+};
 
 /// Both product IDs expose the control endpoint on interface 0 and answer
-/// transaction ID `0x1F`.
+/// transaction ID `0x1F`. Response delays are OpenRazer's per-PID waits.
 pub const USB_IDS: [UsbId; 2] = [
     UsbId {
         product_id: 0x008F,
         link: Link::Wired,
         interface: 0,
         transaction_id: 0x1F,
+        response_delay: Duration::from_micros(600),
     },
     UsbId {
         product_id: 0x0090,
         link: Link::Receiver,
         interface: 0,
         transaction_id: 0x1F,
+        response_delay: Duration::from_millis(31),
     },
 ];
 
@@ -106,50 +115,67 @@ pub const BUTTON_SLOTS: [ButtonSlot; 30] = {
 pub const FIRMWARE_VERSION: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x81, 0x02),
     name: "firmware version",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-common"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-common",
+    ],
 };
 
 pub const SERIAL: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x82, 0x16),
     name: "serial number",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-common"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-common",
+    ],
 };
 
 pub const DEVICE_MODE: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x84, 0x02),
     name: "device mode",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-common"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-common",
+    ],
 };
 
 pub const POLL_RATE: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x85, 0x01),
     name: "poll rate",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const PROFILE_SUMMARY: CommandSpec = CommandSpec {
     command: Command::new(0x00, 0x87, 0x00),
     name: "onboard profile summary",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const BUTTON_INVENTORY: CommandSpec = CommandSpec {
     command: Command::new(0x02, 0x84, 0x05),
     name: "mappable button inventory",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-side-panels"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-side-panels"],
 };
 
 pub const BUTTON_FUNCTION: CommandSpec = CommandSpec {
     command: Command::new(0x02, 0x8C, 0x0A),
     name: "button function",
-    confirmation: Confirmation::ExternalHardware,
+    confirmation: Confirmation::OurHardware,
     sources: &[
+        "chimerazer-m1-reads",
         "opensnek-naga-default-banks",
         "opensnek-naga-button-encoding",
     ],
@@ -158,36 +184,44 @@ pub const BUTTON_FUNCTION: CommandSpec = CommandSpec {
 pub const DPI: CommandSpec = CommandSpec {
     command: Command::new(0x04, 0x85, 0x07),
     name: "DPI",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-naga-default-banks",
+        "openrazer-mouse",
+    ],
 };
 
 pub const DPI_STAGES: CommandSpec = CommandSpec {
     command: Command::new(0x04, 0x86, 0x26),
     name: "DPI stages",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-naga-default-banks",
+        "openrazer-mouse",
+    ],
 };
 
 pub const PROFILE_COUNT: CommandSpec = CommandSpec {
     command: Command::new(0x05, 0x80, 0x00),
     name: "onboard profile count",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const PROFILE_INVENTORY: CommandSpec = CommandSpec {
     command: Command::new(0x05, 0x81, 0x00),
     name: "onboard profile inventory",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const ACTIVE_PROFILE: CommandSpec = CommandSpec {
     command: Command::new(0x05, 0x84, 0x00),
     name: "active onboard profile",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const PROFILE_METADATA: CommandSpec = CommandSpec {
@@ -200,43 +234,63 @@ pub const PROFILE_METADATA: CommandSpec = CommandSpec {
 pub const BATTERY_LEVEL: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x80, 0x02),
     name: "battery level",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const LOW_BATTERY_THRESHOLD: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x81, 0x01),
     name: "low battery threshold",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const IDLE_TIME: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x83, 0x02),
     name: "idle time",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const CHARGING: CommandSpec = CommandSpec {
     command: Command::new(0x07, 0x84, 0x02),
     name: "charging status",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-usb-protocol",
+        "openrazer-mouse",
+    ],
 };
 
 pub const LED_EFFECT: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x82, 0x0C),
     name: "LED effect state",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-crud-spec"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-crud-spec"],
 };
 
 pub const LED_BRIGHTNESS: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x84, 0x03),
     name: "LED brightness",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks", "opensnek-device-support"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-naga-default-banks",
+        "opensnek-device-support",
+    ],
 };
 
 /// Every command this module can issue. Read-only until M2.

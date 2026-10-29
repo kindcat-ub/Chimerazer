@@ -1,32 +1,29 @@
-//! Every supported product ID has a udev rule granting hidraw access.
+//! The udev rule grants access to Razer hidraw nodes by vendor alone, so
+//! detection by capability is not blocked by a product list.
 
 use std::path::Path;
 
-use chimerazer_devices::{RAZER_VENDOR_ID, naga_pro};
+use chimerazer_devices::RAZER_VENDOR_ID;
 
 #[test]
-fn rules_cover_all_product_ids() {
+fn rule_covers_vendor_without_product_list() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/udev/70-chimerazer.rules");
     let rules =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let rule_lines: Vec<&str> = rules
         .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
-
-    for usb in &naga_pro::USB_IDS {
-        let vendor = format!("ATTRS{{idVendor}}==\"{RAZER_VENDOR_ID:04x}\"");
-        let product = format!("ATTRS{{idProduct}}==\"{:04x}\"", usb.product_id);
-        assert!(
-            rule_lines.iter().any(|l| {
-                l.contains("KERNEL==\"hidraw*\"")
-                    && l.contains(&vendor)
-                    && l.contains(&product)
-                    && l.contains("TAG+=\"uaccess\"")
-            }),
-            "no hidraw rule for {:04x}",
-            usb.product_id
-        );
-    }
+    let vendor = format!("ATTRS{{idVendor}}==\"{RAZER_VENDOR_ID:04x}\"");
+    assert_eq!(rule_lines.len(), 1, "{rule_lines:?}");
+    let rule = rule_lines[0];
+    assert!(rule.contains("KERNEL==\"hidraw*\""));
+    assert!(rule.contains(&vendor));
+    assert!(rule.contains("TAG+=\"uaccess\""));
+    // ATTRS keys must match one parent device; product or interface
+    // attributes would either narrow detection or silently never match.
+    assert!(!rule.contains("idProduct"));
+    assert!(!rule.contains("bInterfaceNumber"));
 }
