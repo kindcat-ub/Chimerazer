@@ -144,8 +144,8 @@ pub const PROFILE_SUMMARY: CommandSpec = CommandSpec {
 pub const BUTTON_INVENTORY: CommandSpec = CommandSpec {
     command: Command::new(0x02, 0x84, 0x05),
     name: "mappable button inventory",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-side-panels"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-side-panels"],
 };
 
 pub const BUTTON_FUNCTION: CommandSpec = CommandSpec {
@@ -161,36 +161,44 @@ pub const BUTTON_FUNCTION: CommandSpec = CommandSpec {
 pub const DPI: CommandSpec = CommandSpec {
     command: Command::new(0x04, 0x85, 0x07),
     name: "DPI",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-naga-default-banks",
+        "openrazer-mouse",
+    ],
 };
 
 pub const DPI_STAGES: CommandSpec = CommandSpec {
     command: Command::new(0x04, 0x86, 0x26),
     name: "DPI stages",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-naga-default-banks",
+        "openrazer-mouse",
+    ],
 };
 
 pub const PROFILE_COUNT: CommandSpec = CommandSpec {
     command: Command::new(0x05, 0x80, 0x00),
     name: "onboard profile count",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const PROFILE_INVENTORY: CommandSpec = CommandSpec {
     command: Command::new(0x05, 0x81, 0x00),
     name: "onboard profile inventory",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const ACTIVE_PROFILE: CommandSpec = CommandSpec {
     command: Command::new(0x05, 0x84, 0x00),
     name: "active onboard profile",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m1-reads", "opensnek-naga-default-banks"],
 };
 
 pub const PROFILE_METADATA: CommandSpec = CommandSpec {
@@ -238,8 +246,12 @@ pub const LED_EFFECT: CommandSpec = CommandSpec {
 pub const LED_BRIGHTNESS: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x84, 0x03),
     name: "LED brightness",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-naga-default-banks", "opensnek-device-support"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m1-reads",
+        "opensnek-naga-default-banks",
+        "opensnek-device-support",
+    ],
 };
 
 /// Every command this module can issue. Read-only until M2.
