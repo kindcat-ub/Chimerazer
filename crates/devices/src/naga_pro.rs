@@ -9,9 +9,13 @@ use std::time::Duration;
 
 use chimerazer_protocol::{ARGS_LEN, Command};
 
-use crate::{CommandSpec, Confirmation, Link, UsbId};
+use crate::{CommandSpec, Confirmation, Link, Model, UsbId};
 
-pub const MODEL: &str = "Razer Naga Pro";
+pub const MODEL: Model = Model {
+    name: "Razer Naga Pro",
+    usb_ids: &USB_IDS,
+    commands: COMMANDS,
+};
 
 /// Both product IDs expose the control endpoint on interface 0 and answer
 /// transaction ID `0x1F`. Response delays are OpenRazer's per-PID waits.

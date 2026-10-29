@@ -8,9 +8,10 @@
 # The rule number must stay below 73 so that "uaccess" is applied by
 # systemd-logind (73-seat-late.rules).
 
-# Only the control interface (USB interface 0) is opened up; the keyboard
-# and consumer interfaces of the same device stay root-only.
-
-# Razer Naga Pro: wired, 2.4 GHz receiver
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{bInterfaceNumber}=="00", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="008f", TAG+="uaccess"
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{bInterfaceNumber}=="00", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0090", TAG+="uaccess"
+# All hidraw nodes of Razer devices. The control interface is found at run
+# time by its 90-byte feature report, not by a product list, so a model or
+# mode change (new product ID) needs no rule update.
+#
+# Note: all ATTRS keys of one rule must match the same parent device, so
+# USB interface attributes cannot be combined with idVendor here.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", TAG+="uaccess"

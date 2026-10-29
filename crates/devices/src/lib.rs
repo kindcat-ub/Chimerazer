@@ -17,6 +17,34 @@ pub use exchange::{ExchangeError, Trace, exchange};
 /// Razer USB vendor ID.
 pub const RAZER_VENDOR_ID: u16 = 0x1532;
 
+/// What we know about one device model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Model {
+    pub name: &'static str,
+    pub usb_ids: &'static [UsbId],
+    pub commands: &'static [CommandSpec],
+}
+
+/// Every model with a module in this crate.
+pub const MODELS: &[Model] = &[naga_pro::MODEL];
+
+/// The model and transport parameters for a product ID, if the model is known.
+pub fn lookup(product_id: u16) -> Option<(&'static Model, &'static UsbId)> {
+    MODELS.iter().find_map(|m| {
+        m.usb_ids
+            .iter()
+            .find(|u| u.product_id == product_id)
+            .map(|u| (m, u))
+    })
+}
+
+/// A Razer configuration endpoint is recognised by capability, not by a
+/// product list: vendor 0x1532 and a 90-byte feature report with no report
+/// ID. Whether the model is known is a separate question ([`lookup`]).
+pub fn is_control_interface(vendor_id: u16, feature_report_len: Option<usize>) -> bool {
+    vendor_id == RAZER_VENDOR_ID && feature_report_len == Some(chimerazer_protocol::REPORT_LEN)
+}
+
 /// How the device is attached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
@@ -93,4 +121,37 @@ pub fn read_request(usb: &UsbId, spec: &CommandSpec, args: &[u8]) -> Result<Requ
         return Err(RequestError::NotARead(spec.command));
     }
     Request::new(usb.transaction_id, spec.command, args).map_err(RequestError::Args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_interface_is_recognised_by_capability() {
+        assert!(is_control_interface(RAZER_VENDOR_ID, Some(90)));
+        assert!(!is_control_interface(RAZER_VENDOR_ID, None));
+        assert!(!is_control_interface(RAZER_VENDOR_ID, Some(1)));
+        assert!(!is_control_interface(0x046D, Some(90)));
+    }
+
+    #[test]
+    fn lookup_finds_known_products_only() {
+        let (model, usb) = lookup(0x0090).unwrap();
+        assert_eq!(model.name, naga_pro::MODEL.name);
+        assert_eq!(usb.link, Link::Receiver);
+        assert!(lookup(0x0092).is_none());
+    }
+
+    #[test]
+    fn product_ids_are_unique_across_models() {
+        let mut ids: Vec<u16> = MODELS
+            .iter()
+            .flat_map(|m| m.usb_ids.iter().map(|u| u.product_id))
+            .collect();
+        let n = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), n);
+    }
 }

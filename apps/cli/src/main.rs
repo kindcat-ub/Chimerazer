@@ -3,7 +3,10 @@
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
-use chimerazer_devices::{CommandSpec, RAZER_VENDOR_ID, UsbId, exchange, naga_pro, read_request};
+use chimerazer_devices::{
+    CommandSpec, Model, RAZER_VENDOR_ID, UsbId, exchange, is_control_interface, lookup, naga_pro,
+    read_request,
+};
 use chimerazer_protocol::{
     ButtonInventory, DpiStages, DpiXy, LedBrightness, ProfileInventory, Response,
 };
@@ -12,7 +15,7 @@ use chimerazer_transport::{HidInterface, Hidraw, enumerate};
 const USAGE: &str = "\
 usage:
   chimerazer list
-  chimerazer read <CC:II> [ARG..] [--pid 008f|0090] [--txn XX]
+  chimerazer read <CC:II> [ARG..] [--pid PID] [--txn XX]
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
@@ -45,21 +48,16 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// The Razer control interface of a supported product, if `hid` is one.
-fn control_usb(hid: &HidInterface) -> Option<&'static UsbId> {
-    let usb = naga_pro::usb_id(hid.product_id)?;
-    (hid.vendor_id == RAZER_VENDOR_ID
-        && hid.interface == Some(usb.interface)
-        && hid.feature_report_len == Some(chimerazer_protocol::REPORT_LEN))
-    .then_some(usb)
-}
-
 fn list() -> Result<(), String> {
     let all = enumerate().map_err(|e| format!("cannot read sysfs: {e}"))?;
     for hid in all.iter().filter(|h| h.vendor_id == RAZER_VENDOR_ID) {
-        let role = match control_usb(hid) {
-            Some(usb) => format!("{} control ({:?})", naga_pro::MODEL, usb.link),
-            None => "-".to_string(),
+        let role = if is_control_interface(hid.vendor_id, hid.feature_report_len) {
+            match lookup(hid.product_id) {
+                Some((model, usb)) => format!("control: {} ({:?})", model.name, usb.link),
+                None => "control: unknown model".to_string(),
+            }
+        } else {
+            "-".to_string()
         };
         println!(
             "{}  {:04x}:{:04x}  interface {}  feature {}  {role}",
@@ -73,16 +71,16 @@ fn list() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_command(s: &str) -> Result<&'static CommandSpec, String> {
-    naga_pro::COMMANDS
+fn parse_command(model: &Model, s: &str) -> Result<&'static CommandSpec, String> {
+    model
+        .commands
         .iter()
         .find(|c| c.command.to_string().eq_ignore_ascii_case(s))
-        .ok_or_else(|| format!("{s} is not in the Naga Pro command catalog"))
+        .ok_or_else(|| format!("{s} is not in the {} command catalog", model.name))
 }
 
 fn read(args: &[String]) -> Result<(), String> {
     let (cmd, rest) = args.split_first().ok_or(USAGE)?;
-    let spec = parse_command(cmd)?;
     let mut pid = None;
     let mut txn = None;
     let mut bytes = Vec::new();
@@ -100,18 +98,18 @@ fn read(args: &[String]) -> Result<(), String> {
     }
 
     let all = enumerate().map_err(|e| format!("cannot read sysfs: {e}"))?;
-    let candidates: Vec<(&HidInterface, &UsbId)> = all
+    let controls: Vec<&HidInterface> = all
         .iter()
-        .filter_map(|h| control_usb(h).map(|u| (h, u)))
-        .filter(|(_, u)| pid.is_none_or(|p| p == u.product_id))
+        .filter(|h| is_control_interface(h.vendor_id, h.feature_report_len))
+        .filter(|h| pid.is_none_or(|p| p == h.product_id))
         .collect();
-    let (hid, usb) = match candidates.as_slice() {
+    let hid = match controls.as_slice() {
         [one] => *one,
-        [] => return Err("no supported device found (see `chimerazer list`)".into()),
+        [] => return Err("no Razer control interface found (see `chimerazer list`)".into()),
         many => {
             let pids: Vec<String> = many
                 .iter()
-                .map(|(_, u)| format!("{:04x}", u.product_id))
+                .map(|h| format!("{:04x}", h.product_id))
                 .collect();
             return Err(format!(
                 "several devices found, choose with --pid {}",
@@ -119,6 +117,13 @@ fn read(args: &[String]) -> Result<(), String> {
             ));
         }
     };
+    let (model, usb) = lookup(hid.product_id).ok_or_else(|| {
+        format!(
+            "1532:{:04x} is a Razer control interface, but its model is not supported yet",
+            hid.product_id
+        )
+    })?;
+    let spec = parse_command(model, cmd)?;
 
     let usb = &UsbId {
         transaction_id: txn.unwrap_or(usb.transaction_id),
@@ -151,7 +156,7 @@ fn read(args: &[String]) -> Result<(), String> {
         response.status, response.data_size
     );
     println!("args     {}", hex(significant_args(&response.args)));
-    if let Some(decoded) = decode(spec, &bytes, &response) {
+    if let Some(decoded) = decode(model, spec, &bytes, &response) {
         println!("decoded  {decoded}");
     }
     Ok(())
@@ -164,7 +169,7 @@ fn significant_args(args: &[u8]) -> &[u8] {
     &args[..end]
 }
 
-fn decode(spec: &CommandSpec, req: &[u8], r: &Response) -> Option<String> {
+fn decode(model: &Model, spec: &CommandSpec, req: &[u8], r: &Response) -> Option<String> {
     let a = &r.args;
     let c = spec.command;
     let out = if c == naga_pro::DPI.command {
@@ -177,7 +182,7 @@ fn decode(spec: &CommandSpec, req: &[u8], r: &Response) -> Option<String> {
         format!("{:?}", ProfileInventory::decode(a))
     } else if c == naga_pro::BUTTON_INVENTORY.command {
         format!("{:?}", ButtonInventory::decode(a))
-    } else if c == naga_pro::BUTTON_FUNCTION.command {
+    } else if c == naga_pro::BUTTON_FUNCTION.command && *model == naga_pro::MODEL {
         let (&storage, &slot) = (req.first()?, req.get(1)?);
         format!("{:?}", naga_pro::decode_button_function(a, storage, slot))
     } else {
