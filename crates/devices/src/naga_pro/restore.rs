@@ -86,17 +86,39 @@ pub struct RestoreReport {
     /// Dump keys that restore does not cover (not writable or not verified).
     pub not_restorable: Vec<String>,
     /// Differences from the dump after the run (volatile keys excluded).
-    pub remaining: Vec<(String, Option<String>, Option<String>)>,
+    pub remaining: Vec<Difference>,
+    /// Dump keys restore may write on this link.
+    pub verified_keys: BTreeSet<String>,
 }
 
+type Difference = (String, Option<String>, Option<String>);
+
 impl RestoreReport {
-    /// All verified values match the dump and nothing failed.
+    /// Remaining differences in values restore may write on this link.
+    pub fn unrestored(&self) -> Vec<&Difference> {
+        self.remaining
+            .iter()
+            .filter(|(k, _, _)| self.verified_keys.contains(k))
+            .collect()
+    }
+
+    /// Remaining differences outside what restore may write.
+    pub fn outside_scope(&self) -> Vec<&Difference> {
+        self.remaining
+            .iter()
+            .filter(|(k, _, _)| !self.verified_keys.contains(k))
+            .collect()
+    }
+
+    /// Nothing failed and every value restore may write on this link now
+    /// matches the dump. Says nothing about values outside that scope.
     pub fn ok(&self) -> bool {
         self.refused.is_none()
             && self
                 .entries
                 .iter()
                 .all(|e| !matches!(e.outcome, Outcome::Failed(_) | Outcome::NotAttempted))
+            && self.unrestored().is_empty()
     }
 }
 
@@ -173,6 +195,9 @@ pub fn restore(
     for param in candidates() {
         let key = param.dump_key();
         covered.extend(param.covered_keys());
+        if param.verified_on(usb.link) {
+            report.verified_keys.extend(param.covered_keys());
+        }
         let mut entry = Entry {
             param,
             key: key.clone(),
@@ -332,6 +357,9 @@ mod tests {
         assert_eq!(*outcome(&r, "live.dpi"), Outcome::Unchanged);
         assert_eq!(sim.dpi[&1], [0x03, 0x20, 0x03, 0x20]);
         assert_eq!(r.remaining.len(), 1);
+        // A verified value still differs: not a successful restore.
+        assert!(!r.ok());
+        assert_eq!(r.unrestored().len(), 1);
     }
 
     #[test]
@@ -367,6 +395,11 @@ mod tests {
         // Profile 1 was not written through the receiver.
         assert_eq!(sim.dpi[&1], [0x03, 0x20, 0x03, 0x20]);
         assert!(r.remaining.iter().any(|(k, _, _)| k == "p1.dpi"));
+        // Profile 1 is outside the receiver's verified scope: reported
+        // separately, not counted as unrestored.
+        assert!(r.ok(), "{r:#?}");
+        assert!(r.unrestored().is_empty());
+        assert!(r.outside_scope().iter().any(|(k, _, _)| k == "p1.dpi"));
     }
 
     #[test]

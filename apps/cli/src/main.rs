@@ -536,36 +536,57 @@ fn restore(args: &[String]) -> Result<(), String> {
         ));
     }
     if report.refused.is_none() {
-        md.push_str(&format!(
-            "\n## Device vs dump after the run ({} differences)\n\n",
-            report.remaining.len()
-        ));
-        for (k, a, b) in &report.remaining {
-            md.push_str(&format!(
-                "- `{k}`: dump `{}`, device `{}`\n",
-                a.as_deref().unwrap_or("-"),
-                b.as_deref().unwrap_or("-")
-            ));
-        }
+        let list =
+            |md: &mut String, title: &str, diffs: &[&(String, Option<String>, Option<String>)]| {
+                md.push_str(&format!("\n## {title} ({})\n\n", diffs.len()));
+                for (k, a, b) in diffs {
+                    md.push_str(&format!(
+                        "- `{k}`: dump `{}`, device `{}`\n",
+                        a.as_deref().unwrap_or("-"),
+                        b.as_deref().unwrap_or("-")
+                    ));
+                }
+            };
+        list(
+            &mut md,
+            "Restorable values still differing from the dump",
+            &report.unrestored(),
+        );
+        list(
+            &mut md,
+            "Other differences (outside the verified scope, not touched)",
+            &report.outside_scope(),
+        );
     }
     write_log(log, &md)?;
 
     let count = |f: fn(&Outcome) -> bool| report.entries.iter().filter(|e| f(&e.outcome)).count();
     let summary = format!(
-        "restored {}, unchanged {}, would restore {}, skipped {}, failed {}, not attempted {}, not restorable {}, differences left {}",
+        "restored {}, unchanged {}, would restore {}, skipped {}, failed {}, not attempted {}; \
+         restorable values still differing {}; outside the verified scope: {} keys not restorable, {} differing",
         count(|o| matches!(o, Outcome::Restored { .. })),
         count(|o| matches!(o, Outcome::Unchanged)),
         count(|o| matches!(o, Outcome::WouldRestore)),
         count(|o| matches!(o, Outcome::Skipped(_))),
         count(|o| matches!(o, Outcome::Failed(_))),
         count(|o| matches!(o, Outcome::NotAttempted)),
+        report.unrestored().len(),
         report.not_restorable.len(),
-        report.remaining.len(),
+        report.outside_scope().len(),
     );
     match &report.refused {
         Some(why) => Err(format!("REFUSED: {why}")),
+        None if dry_run => {
+            eprintln!("DRY RUN, nothing written: {summary}");
+            Ok(())
+        }
         None if report.ok() => {
-            eprintln!("OK: {summary}");
+            let scope = if report.outside_scope().is_empty() {
+                "verified values restored; nothing else differs"
+            } else {
+                "verified values restored; other differences remain (not restored)"
+            };
+            eprintln!("OK, {scope}: {summary}");
             Ok(())
         }
         None => Err(format!("FAILED: {summary}")),
