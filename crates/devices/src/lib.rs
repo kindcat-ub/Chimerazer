@@ -111,12 +111,23 @@ pub enum RequestError {
     Args(ArgsTooLong),
 }
 
+/// One combination of write command, link and storage that has passed the
+/// first hardware validation. `storage` is the first argument of the write;
+/// `None` for commands without a storage argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteScope {
+    pub command: Command,
+    pub link: Link,
+    pub storage: Option<u8>,
+}
+
 /// How a write is being performed (`docs/ARCHITECTURE.md`, "Первичная
 /// аппаратная валидация записи").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteMode {
-    /// Regular operation: only commands verified on our hardware.
-    Normal,
+    /// Regular operation: an `OurHardware` command, and only in one of the
+    /// verified `scopes` (command, link, storage).
+    Normal { scopes: &'static [WriteScope] },
     /// First hardware validation of a command that is not yet verified.
     FirstValidation {
         /// The project owner explicitly allowed this `SourceOnly` command.
@@ -146,8 +157,18 @@ pub fn write_request(
         return Err(RequestError::NotARead(read.command));
     }
     match (mode, write.confirmation) {
-        (_, Confirmation::OurHardware) => {}
-        (WriteMode::Normal, _) => {
+        (WriteMode::Normal { scopes }, Confirmation::OurHardware) => {
+            let in_scope = scopes.iter().any(|s| {
+                s.command == write.command
+                    && s.link == usb.link
+                    && s.storage.is_none_or(|st| args.first() == Some(&st))
+            });
+            if !in_scope {
+                return refuse("this link/storage combination is not verified");
+            }
+        }
+        (WriteMode::FirstValidation { .. }, Confirmation::OurHardware) => {}
+        (WriteMode::Normal { .. }, _) => {
             return refuse("not verified on our hardware; use first validation");
         }
         (WriteMode::FirstValidation { .. }, _)
@@ -222,7 +243,14 @@ mod tests {
     #[test]
     fn write_gate() {
         use Confirmation::*;
-        let usb = &naga_pro::USB_IDS[0];
+        let wired = &naga_pro::USB_IDS[0];
+        let receiver = &naga_pro::USB_IDS[1];
+        const SCOPES: &[WriteScope] = &[WriteScope {
+            command: Command::new(0x04, 0x05, 1),
+            link: Link::Wired,
+            storage: Some(1),
+        }];
+        let normal = WriteMode::Normal { scopes: SCOPES };
         let first = WriteMode::FirstValidation {
             allow_source_only: false,
         };
@@ -231,32 +259,29 @@ mod tests {
         };
         let read_ok = SPEC(0x04, 0x85, OurHardware);
         let read_ext = SPEC(0x04, 0x85, ExternalHardware);
-        let ok = |w, r, m| write_request(usb, &w, &r, &[0], m).is_ok();
+        let ok = |usb, w, r, args: &[u8], m| write_request(usb, &w, &r, args, m).is_ok();
+        let set = |c| SPEC(0x04, 0x05, c);
 
-        assert!(ok(
-            SPEC(0x04, 0x05, OurHardware),
-            read_ok,
-            WriteMode::Normal
-        ));
+        // Normal: verified command, inside a verified scope only.
+        assert!(ok(wired, set(OurHardware), read_ok, &[1], normal));
+        assert!(!ok(wired, set(OurHardware), read_ok, &[2], normal));
+        assert!(!ok(receiver, set(OurHardware), read_ok, &[1], normal));
+        assert!(!ok(wired, set(ExternalHardware), read_ok, &[1], normal));
         assert!(!ok(
-            SPEC(0x04, 0x05, ExternalHardware),
-            read_ok,
-            WriteMode::Normal
-        ));
-        assert!(ok(SPEC(0x04, 0x05, ExternalHardware), read_ok, first));
-        assert!(!ok(SPEC(0x04, 0x05, ExternalHardware), read_ext, first));
-        assert!(!ok(SPEC(0x04, 0x05, SourceOnly), read_ok, first));
-        assert!(ok(SPEC(0x04, 0x05, SourceOnly), read_ok, owner_ok));
-        assert!(!ok(
+            wired,
             SPEC(0x04, 0x85, OurHardware),
             read_ok,
-            WriteMode::Normal
+            &[1],
+            normal
         ));
-        assert!(!ok(
-            SPEC(0x04, 0x05, OurHardware),
-            SPEC(0x04, 0x05, OurHardware),
-            WriteMode::Normal
-        ));
+        assert!(!ok(wired, set(OurHardware), set(OurHardware), &[1], normal));
+
+        // First validation: explicit, not limited by scopes.
+        assert!(ok(receiver, set(OurHardware), read_ok, &[2], first));
+        assert!(ok(wired, set(ExternalHardware), read_ok, &[0], first));
+        assert!(!ok(wired, set(ExternalHardware), read_ext, &[0], first));
+        assert!(!ok(wired, set(SourceOnly), read_ok, &[0], first));
+        assert!(ok(wired, set(SourceOnly), read_ok, &[0], owner_ok));
     }
 
     #[test]

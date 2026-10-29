@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chimerazer_protocol::{ARGS_LEN, Command};
 
-use crate::{CommandSpec, Confirmation, Link, Model, UsbId};
+use crate::{CommandSpec, Confirmation, Link, Model, UsbId, WriteScope};
 
 pub const MODEL: Model = Model {
     name: "Razer Naga Pro",
@@ -327,8 +327,9 @@ pub const SET_POLL_RATE: CommandSpec = CommandSpec {
 pub const SET_DPI: CommandSpec = CommandSpec {
     command: Command::new(0x04, 0x05, 0x07),
     name: "set DPI",
-    confirmation: Confirmation::ExternalHardware,
+    confirmation: Confirmation::OurHardware,
     sources: &[
+        "chimerazer-m2-validation",
         "opensnek-device-support",
         "openrazer-mouse",
         "snakecharmer-spec",
@@ -338,16 +339,62 @@ pub const SET_DPI: CommandSpec = CommandSpec {
 pub const SET_DPI_STAGES: CommandSpec = CommandSpec {
     command: Command::new(0x04, 0x06, 0x26),
     name: "set DPI stages",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-device-support", "openrazer-mouse"],
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m2-validation",
+        "opensnek-device-support",
+        "openrazer-mouse",
+    ],
 };
 
 pub const SET_LED_BRIGHTNESS: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x04, 0x03),
     name: "set LED brightness",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-device-support"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m2-validation", "opensnek-device-support"],
 };
+
+/// Where each verified write may run in normal operation (restore). Every
+/// entry is backed by a protocol in `docs/validation/naga-pro/`. Profiles
+/// 2–5 and writes to profile storage through the receiver are not here
+/// because they have not been validated.
+pub const VERIFIED_WRITES: &[WriteScope] = &[
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Receiver,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_DPI_STAGES.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_DPI_STAGES.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_LED_BRIGHTNESS.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_LED_BRIGHTNESS.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+];
 
 /// Write commands implemented in code. Every first write goes through
 /// [`params`] validation; see `docs/ARCHITECTURE.md`.

@@ -43,14 +43,22 @@
 
 ## Команды записи
 
-В коде (`WRITE_COMMANDS`): `00:05`, `04:05`, `04:06`, `0F:04`; их строки сверяются тестом так же, как чтения. Остальные — справочно. В обычном режиме писать можно только командами `OurHardware`; первая запись — только через `chimerazer validate` (процедура в `docs/ARCHITECTURE.md`).
+В коде (`WRITE_COMMANDS`): `00:05`, `04:05`, `04:06`, `0F:04`; их строки сверяются тестом так же, как чтения. Остальные — справочно. В обычном режиме (`restore`) писать можно только командами `OurHardware` и только в подтверждённых сочетаниях «подключение + storage» (`VERIFIED_WRITES` в коде):
+
+| Команда | Провод `008F` | Свисток `0090` |
+|---|---|---|
+| `04:05` DPI | `storage 0`, `storage 1` | `storage 0` |
+| `04:06` стадии DPI | `storage 0`, `storage 1` | — |
+| `0F:04` яркость (LED `01`, `04`) | `storage 0`, `storage 1` | — |
+
+Профили 2–5 и запись в профили через свисток не допускаются до отдельной проверки. Первая запись в новом сочетании — только через `chimerazer validate` (процедура в `docs/ARCHITECTURE.md`).
 
 | Команда | Назначение | Size | Аргументы | Статус | Источники | Примечание |
 |---|---|---|---|---|---|---|
 | `00:05` | частота опроса | `01` | `[rate]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
 | `02:0C` | функция кнопки | `0A` | `[storage, slot, hypershift, block×7]` | `ExternalHardware` | `opensnek-naga-side-panels`, `opensnek-naga-default-banks` | Устройство иногда возвращает ошибку, хотя запись прошла. Проверять только чтением. |
-| `04:05` | DPI | `07` | `[storage, x_be16, y_be16, 0, 0]` | `ExternalHardware` | `opensnek-device-support`, `openrazer-mouse`, `snakecharmer-spec` | Наш экземпляр: запись в `storage 0` применяется сразу и сбрасывается при переподключении (`docs/validation/naga-pro/04-05-dpi.md`). Источники расходятся по флагу сохранения: OpenRazer всегда шлёт `01`, Snakecharmer — `00`, OpenSnek — `00` для живого слоя. |
-| `04:06` | стадии DPI | `26` | `[storage, active_id, count, rows]` | `ExternalHardware` | `opensnek-device-support`, `openrazer-mouse` | OpenSnek всегда пишет 5 строк с `count = 5`. |
+| `04:05` | DPI | `07` | `[storage, x_be16, y_be16, 0, 0]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support`, `openrazer-mouse`, `snakecharmer-spec` | Наш экземпляр: запись в `storage 0` применяется сразу и сбрасывается при переподключении (`docs/validation/naga-pro/04-05-dpi.md`). Источники расходятся по флагу сохранения: OpenRazer всегда шлёт `01`, Snakecharmer — `00`, OpenSnek — `00` для живого слоя. |
+| `04:06` | стадии DPI | `26` | `[storage, active_id, count, rows]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support`, `openrazer-mouse` | OpenSnek всегда пишет 5 строк с `count = 5`. |
 | `05:02` | создать профиль | `01` | `[profile]` | `SourceOnly` | `opensnek-crud-spec` | Сбивает DPI и яркость, после него нужна перезапись. |
 | `05:03` | удалить профиль | `01` | `[profile]` | `SourceOnly` | `opensnek-crud-spec` | Только убирает профиль из цикла, данные не стирает. |
 | `05:04` | выбрать профиль | `01` | `[profile]` | `SourceOnly` | `opensnek-crud-spec` | Неназначенный профиль отклоняется. |
@@ -58,7 +66,7 @@
 | `07:01` | порог низкого заряда | `01` | `[raw]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
 | `07:03` | время до сна | `02` | `[secs_be16]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
 | `0F:02` | статический цвет LED | `09` | `[storage, led, 01, 00, 00, 01, r, g, b]` | `ExternalHardware` | `opensnek-device-support` | |
-| `0F:04` | яркость LED | `03` | `[storage, led, value]` | `ExternalHardware` | `opensnek-device-support` | |
+| `0F:04` | яркость LED | `03` | `[storage, led, value]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support` | |
 
 ## Проверено на нашем экземпляре (M1)
 
