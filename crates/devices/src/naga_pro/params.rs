@@ -274,19 +274,49 @@ impl Param {
         }
     }
 
-    /// Whether this value may be written in normal operation on `link`.
-    pub fn verified_on(&self, link: crate::Link) -> bool {
-        let storage = match *self {
+    fn storage(&self) -> Option<u8> {
+        match *self {
             Self::PollRate => None,
             Self::Dpi { storage }
             | Self::DpiStages { storage }
             | Self::Brightness { storage, .. }
             | Self::Effect { storage, .. } => Some(storage),
-        };
-        self.write_spec().confirmation == crate::Confirmation::OurHardware
+        }
+    }
+
+    /// Every write command this parameter may use.
+    fn write_specs(&self) -> &'static [CommandSpec] {
+        match self {
+            Self::Effect { .. } => &[SET_LED_STATIC, SET_LED_SPECTRUM],
+            Self::PollRate => std::slice::from_ref(&SET_POLL_RATE),
+            Self::Dpi { .. } => std::slice::from_ref(&SET_DPI),
+            Self::DpiStages { .. } => std::slice::from_ref(&SET_DPI_STAGES),
+            Self::Brightness { .. } => std::slice::from_ref(&SET_LED_BRIGHTNESS),
+        }
+    }
+
+    fn spec_verified(&self, spec: &CommandSpec, link: crate::Link) -> bool {
+        spec.confirmation == crate::Confirmation::OurHardware
             && VERIFIED_WRITES.iter().any(|s| {
-                s.command == self.write_spec().command && s.link == link && s.storage == storage
+                // `Command` equality includes the size, which tells the
+                // `0F:02` layouts apart.
+                s.command == spec.command && s.link == link && s.storage == self.storage()
             })
+    }
+
+    /// Whether some value of this parameter may be written in normal
+    /// operation on `link`. For effects, see [`Param::verified_for`].
+    pub fn verified_on(&self, link: crate::Link) -> bool {
+        self.write_specs()
+            .iter()
+            .any(|spec| self.spec_verified(spec, link))
+    }
+
+    /// Whether writing exactly `value` is verified on `link`: the write
+    /// command `value` needs (with its size) must be in scope.
+    pub fn verified_for(&self, link: crate::Link, value: &[u8]) -> bool {
+        self.write_spec_for(value)
+            .is_some_and(|spec| self.spec_verified(spec, link))
     }
 
     /// Human form of a value.
@@ -1145,16 +1175,7 @@ mod tests {
             storage: 0,
             led: LED_LOGO,
         };
-        // Restoring spectrum uses the SourceOnly layout: refused by default,
-        // before anything is sent.
-        let report = validate(&mut sim, &USB, logo, "ff00ff", &base, FIRST);
-        assert!(!report.passed);
-        assert!(report.steps.iter().any(|s| s.note.contains("SourceOnly")));
-        assert_eq!(sim.effect[&(0, LED_LOGO)][0], 3);
-
-        let allowed = WriteMode::FirstValidation {
-            allow_source_only: true,
-        };
+        let allowed = FIRST;
         let report = validate(&mut sim, &USB, logo, "ff00ff", &base, allowed);
         assert!(report.passed, "{:#?}", report.steps);
         let probe = report
@@ -1172,6 +1193,57 @@ mod tests {
             .unwrap();
         assert_eq!(same.traces[0].request[5], 0x06);
         assert_eq!(sim.effect[&(0, LED_LOGO)], [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn effect_scopes_tell_static_and_spectrum_apart() {
+        use crate::{Link, RequestError, write_request};
+        let static_ff = [1, 0, 0, 1, 0xff, 0, 0xff, 0, 0, 0];
+        let spectrum = [3, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let p1 = Param::Effect {
+            storage: 1,
+            led: LED_LOGO,
+        };
+        let live = Param::Effect {
+            storage: 0,
+            led: LED_LOGO,
+        };
+        assert!(p1.verified_for(Link::Wired, &static_ff));
+        assert!(!p1.verified_for(Link::Wired, &spectrum));
+        assert!(live.verified_for(Link::Wired, &spectrum));
+        assert!(live.verified_for(Link::Wired, &static_ff));
+        assert!(!live.verified_for(Link::Receiver, &static_ff));
+        assert!(!p1.verified_on(Link::Receiver));
+        assert!(p1.verified_on(Link::Wired));
+
+        // The gate itself refuses spectrum into a profile in normal mode.
+        let normal = WriteMode::Normal {
+            scopes: VERIFIED_WRITES,
+        };
+        let gate = |param: Param, value: &[u8], usb: &UsbId| {
+            write_request(
+                usb,
+                param.write_spec_for(value).unwrap(),
+                param.read_spec(),
+                &param.write_args(value),
+                normal,
+            )
+        };
+        assert!(gate(p1, &static_ff, &USB).is_ok());
+        assert!(gate(live, &spectrum, &USB).is_ok());
+        assert!(matches!(
+            gate(p1, &spectrum, &USB),
+            Err(RequestError::WriteRefused { .. })
+        ));
+        let receiver = UsbId {
+            product_id: 0x0090,
+            link: Link::Receiver,
+            ..USB
+        };
+        assert!(matches!(
+            gate(live, &static_ff, &receiver),
+            Err(RequestError::WriteRefused { .. })
+        ));
     }
 
     #[test]

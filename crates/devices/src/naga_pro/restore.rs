@@ -31,6 +31,9 @@ pub fn candidates() -> Vec<Param> {
             storage,
             led: LED_SCROLL_WHEEL,
         });
+        for led in [LED_LOGO, LED_SCROLL_WHEEL] {
+            out.push(Param::Effect { storage, led });
+        }
     }
     out
 }
@@ -246,6 +249,18 @@ pub fn restore(
             report.entries.push(entry);
             continue;
         }
+        // Some writes of a parameter are verified and others are not (the
+        // `0F:02` layouts): the value itself must be writable. A skipped
+        // value stays in `verified_keys`, so its difference fails the run.
+        if !param.verified_for(usb.link, &target) {
+            entry.outcome = Outcome::Skipped(format!(
+                "writing {} is not verified for {:?}",
+                param.render(&target),
+                usb.link
+            ));
+            report.entries.push(entry);
+            continue;
+        }
         if dry_run {
             entry.outcome = Outcome::WouldRestore;
             report.entries.push(entry);
@@ -255,9 +270,12 @@ pub fn restore(
         let mode = WriteMode::Normal {
             scopes: VERIFIED_WRITES,
         };
+        let spec = param
+            .write_spec_for(&target)
+            .expect("verified_for checked the write command");
         let written = match write_request(
             usb,
-            param.write_spec(),
+            spec,
             param.read_spec(),
             &param.write_args(&target),
             mode,
@@ -360,6 +378,53 @@ mod tests {
         // A verified value still differs: not a successful restore.
         assert!(!r.ok());
         assert_eq!(r.unrestored().len(), 1);
+    }
+
+    #[test]
+    fn unverified_effect_restore_is_reported_and_fails() {
+        // The dump has spectrum everywhere; profile 1 now holds a static
+        // colour. Spectrum into a profile is not verified.
+        let mut sim = Sim::new();
+        let dump = read_snapshot(&mut sim, &WIRED).values;
+        let fuchsia = [1, 0, 0, 1, 0xff, 0, 0xff, 0, 0, 0];
+        sim.effect.insert((1, LED_LOGO), fuchsia);
+        sim.effect.insert((0, LED_LOGO), fuchsia);
+        let r = restore(&mut sim, &WIRED, &dump, false);
+        match outcome(&r, "p1.led.logo.effect") {
+            Outcome::Skipped(why) => assert!(why.contains("not verified"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sim.effect[&(1, LED_LOGO)], fuchsia);
+        assert!(matches!(
+            outcome(&r, "live.led.logo.effect"),
+            Outcome::Restored { .. }
+        ));
+        assert!(!r.ok(), "{r:#?}");
+        assert!(
+            r.unrestored()
+                .iter()
+                .any(|(k, _, _)| k == "p1.led.logo.effect")
+        );
+    }
+
+    #[test]
+    fn static_colour_is_restored_into_profile_1() {
+        let mut sim = Sim::new();
+        let fuchsia = [1, 0, 0, 1, 0xff, 0, 0xff, 0, 0, 0];
+        sim.effect.insert((1, LED_LOGO), fuchsia);
+        let dump = read_snapshot(&mut sim, &WIRED).values;
+        sim.effect
+            .insert((1, LED_LOGO), [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let r = restore(&mut sim, &WIRED, &dump, false);
+        assert!(r.ok(), "{r:#?}");
+        assert_eq!(sim.effect[&(1, LED_LOGO)], fuchsia);
+        // Sent with the static layout (size 09).
+        let e = r
+            .entries
+            .iter()
+            .find(|e| e.key == "p1.led.logo.effect")
+            .unwrap();
+        assert_eq!(e.traces[1].request[5], 0x09);
     }
 
     #[test]

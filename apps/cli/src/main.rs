@@ -44,8 +44,9 @@ usage:
          and leaves it in place; `finish` reads what survived the reconnect,
          restores the originals and checks the whole device against DUMP.
   restore  writes back the values of DUMP that have a verified write on
-         this link (DPI, DPI stages, LED brightness in profile 1; through
-         the receiver the live layer only for DPI). Refuses a DUMP with read errors or another active profile.
+         this link (DPI, DPI stages, LED brightness, LED effect by wire;
+         see VERIFIED_WRITES). An unverified value is skipped and fails
+         the run if it differs. Refuses a DUMP with read errors or another active profile.
          One value at a time, read back after each; no atomicity: a failure
          stops the run and leaves earlier values written. --dry-run only
          reports what would change.";

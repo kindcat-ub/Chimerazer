@@ -359,8 +359,9 @@ pub const SET_LED_BRIGHTNESS: CommandSpec = CommandSpec {
 
 /// Where each verified write may run in normal operation (restore). Every
 /// entry is backed by a protocol in `docs/validation/naga-pro/`. Profiles
-/// 2–5, and the live layer through the receiver for stages and brightness,
-/// are not here because they have not been validated.
+/// 2–5, the live layer through the receiver for stages and brightness,
+/// LED effects through the receiver and spectrum into a profile are not
+/// here because they have not been validated.
 pub const VERIFIED_WRITES: &[WriteScope] = &[
     WriteScope {
         command: SET_DPI.command,
@@ -412,6 +413,23 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
         link: Link::Receiver,
         storage: Some(1),
     },
+    WriteScope {
+        command: SET_LED_STATIC.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_LED_STATIC.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+    // Restoring spectrum into a profile after an effect change is not
+    // verified; only the live layer is.
+    WriteScope {
+        command: SET_LED_SPECTRUM.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
 ];
 
 /// Write commands implemented in code. Every first write goes through
@@ -420,17 +438,16 @@ pub const VERIFIED_WRITES: &[WriteScope] = &[
 pub const SET_LED_STATIC: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x02, 0x09),
     name: "set LED effect: static",
-    confirmation: Confirmation::ExternalHardware,
-    sources: &["opensnek-device-support"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m2-validation", "opensnek-device-support"],
 };
 
-/// `0F:02` spectrum cycling: `[storage, led, 03, 00, 00, 00]`. Observed on
-/// the Naga V3 Pro, not on the Naga Pro.
+/// `0F:02` spectrum cycling: `[storage, led, 03, 00, 00, 00]`.
 pub const SET_LED_SPECTRUM: CommandSpec = CommandSpec {
     command: Command::new(0x0F, 0x02, 0x06),
     name: "set LED effect: spectrum",
-    confirmation: Confirmation::SourceOnly,
-    sources: &["opensnek-naga-v3-pro-effects"],
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m2-validation", "opensnek-naga-v3-pro-effects"],
 };
 
 pub const WRITE_COMMANDS: &[CommandSpec] = &[
