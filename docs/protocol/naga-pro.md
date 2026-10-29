@@ -30,11 +30,11 @@
 | `05:81` | список профилей | `00` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-naga-default-banks` | `[max_id, assigned…]`. |
 | `05:84` | активный профиль | `00` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-naga-default-banks` | Может вернуть `data_size = 0` с валидным `args[0]`. |
 | `05:88` | метаданные профиля (кусок) | `50` | `[profile, off_hi, off_lo, 00, fa]` | `SourceOnly` | `opensnek-crud-spec`, `opensnek-naga-default-banks` | Для неназначенных банков на Naga Pro чтение не проходит. |
-| `07:80` | уровень батареи | `02` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-usb-protocol`, `openrazer-mouse` | `args[1]` в шкале 0–255. |
+| `07:80` | уровень батареи | `02` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-usb-protocol`, `openrazer-mouse` | `args[1]` в шкале 0–255. Других показателей батареи (напряжение, ток, ёмкость) в OpenSnek, OpenRazer и Snakecharmer нет: исследование открытых источников завершено. Отдаёт ли их сама мышь — открытый вопрос; неизвестные команды не перебираем. |
 | `07:81` | порог низкого заряда | `01` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-usb-protocol`, `openrazer-mouse` | Сырое значение `0x0C..0x3F`. |
 | `07:83` | время до сна | `02` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-usb-protocol`, `openrazer-mouse` | Секунды big-endian, 60..900. |
 | `07:84` | статус зарядки | `02` | — | `OurHardware` | `chimerazer-m1-reads`, `opensnek-usb-protocol`, `openrazer-mouse` | `args[1] == 1` — заряжается. |
-| `0F:82` | состояние эффекта LED | `0C` | `[storage, led]` | `OurHardware` | `chimerazer-m1-reads`, `opensnek-crud-spec` | Проверено только на Basilisk V3 Pro. |
+| `0F:82` | состояние эффекта LED | `0C` | `[storage, led]` | `OurHardware` | `chimerazer-m1-reads`, `opensnek-crud-spec` | Ответ: `[storage, led, effect, …]`, в дампе — `args[2..12]`. `effect`: `01` статический (`01 00 00 01 r g b`), `03` Spectrum (по OpenSnek). Эхо `storage` в профилях ненадёжно. |
 | `0F:84` | яркость LED | `03` | `[storage, led]` | `OurHardware` | `chimerazer-m1-reads`, `opensnek-naga-default-banks`, `opensnek-device-support` | LED: `01` колесо, `04` логотип. |
 
 `data_size` в ответах Naga Pro ненадёжен: `05:80` и `05:84` возвращают `0` при значимом `args[0]`, `02:84` — `5` при 30 слотах в аргументах. Декодеры его не используют.
@@ -43,15 +43,17 @@
 
 ## Команды записи
 
-В коде (`WRITE_COMMANDS`): `00:05`, `04:05`, `04:06`, `0F:04`; их строки сверяются тестом так же, как чтения. Остальные — справочно. В обычном режиме (`restore`) писать можно только командами `OurHardware` и только в подтверждённых сочетаниях «подключение + storage» (`VERIFIED_WRITES` в коде):
+В коде (`WRITE_COMMANDS`): `00:05`, `04:05`, `04:06`, `0F:04`, `0F:02` (две формы, различаются размером); их строки сверяются тестом так же, как чтения. Остальные — справочно. В обычном режиме (`restore`) писать можно только командами `OurHardware` и только в подтверждённых сочетаниях «подключение + storage» (`VERIFIED_WRITES` в коде):
 
 | Команда | Провод `008F` | Свисток `0090` |
 |---|---|---|
 | `04:05` DPI | `storage 0`, `storage 1` | `storage 0`, `storage 1` |
 | `04:06` стадии DPI | `storage 0`, `storage 1` | `storage 1` |
 | `0F:04` яркость (LED `01`, `04`) | `storage 0`, `storage 1` | `storage 1` |
+| `0F:02/09` статический цвет (LED `01`, `04`) | `storage 0`, `storage 1` | — |
+| `0F:02/06` Spectrum (LED `01`, `04`) | `storage 0` | — |
 
-Запись в `storage 1` сохраняется после переподключения и после полного выключения мыши. Профили 2–5 и живой слой через свисток для стадий и яркости не допускаются до отдельной проверки. Первая запись в новом сочетании — только через `chimerazer validate` (процедура в `docs/ARCHITECTURE.md`).
+Запись в `storage 1` сохраняется после переподключения и после полного выключения мыши. Профили 2–5, живой слой через свисток для стадий и яркости, эффекты через свисток и возврат Spectrum в профиль не допускаются до отдельной проверки. Формы `0F:02` различаются размером; шлюз и `restore` сверяют фактическую команду с размером, а неподтверждённый возврат эффекта `restore` пропускает и считает невосстановленным. Первая запись в новом сочетании — только через `chimerazer validate` (процедура в `docs/ARCHITECTURE.md`).
 
 | Команда | Назначение | Size | Аргументы | Статус | Источники | Примечание |
 |---|---|---|---|---|---|---|
@@ -65,7 +67,8 @@
 | `05:08` | метаданные профиля (кусок) | `50` | `[profile, off_hi, off_lo, 00, fa, data×75]` | `SourceOnly` | `opensnek-crud-spec` | Писать только все 4 куска. Последний может не подтвердиться. |
 | `07:01` | порог низкого заряда | `01` | `[raw]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
 | `07:03` | время до сна | `02` | `[secs_be16]` | `SourceOnly` | `opensnek-usb-protocol`, `openrazer-mouse` | |
-| `0F:02` | статический цвет LED | `09` | `[storage, led, 01, 00, 00, 01, r, g, b]` | `ExternalHardware` | `opensnek-device-support` | |
+| `0F:02` | эффект LED: статический цвет | `09` | `[storage, led, 01, 00, 00, 01, r, g, b]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support` | В коде: `SET_LED_STATIC`. Чтение обратно — `0F:82`. На нашем экземпляре работает в живом слое и в профиле 1, переживает выключение (`docs/validation/naga-pro/0F-02-led-effect.md`). |
+| `0F:02` | эффект LED: Spectrum | `06` | `[storage, led, 03, 00, 00, 00]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-naga-v3-pro-effects` | В коде: `SET_LED_SPECTRUM`. Этой формой OpenSnek возвращал Spectrum на Naga V3 Pro. На нашем экземпляре возвращает Spectrum байт в байт (`docs/validation/naga-pro/0F-02-led-effect.md`). |
 | `0F:04` | яркость LED | `03` | `[storage, led, value]` | `OurHardware` | `chimerazer-m2-validation`, `opensnek-device-support` | |
 
 ## Проверено на нашем экземпляре (M1)
@@ -78,4 +81,5 @@
 
 ## Открытые вопросы для M1–M2
 
+- Есть ли у Naga Pro команда чтения напряжения или других данных контроллера питания. В открытых источниках её нет; без источника не исследуется.
 - Подсветка 12-кнопочной панели (LED `0x05`) известна только из OpenRazer и в таблицу не внесена.
