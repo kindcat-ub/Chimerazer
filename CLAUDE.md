@@ -7,7 +7,8 @@ Cargo.toml              корень Cargo workspace
 crates/protocol/        chimerazer-protocol — Razer-репорт, без I/O
 crates/devices/         chimerazer-devices — адаптеры устройств (по модулю на модель)
 crates/transport/       chimerazer-transport — hidraw через sysfs
-apps/cli/               chimerazer — CLI (M1); панель появится в M3
+apps/cli/               chimerazer — CLI (M1)
+apps/panel/             chimerazer-panel — функциональная панель (M3)
 fixtures/<устройство>/  данные для тестов с указанием источника в заголовке файла
 packaging/udev/         udev-правила
 docs/ROADMAP.md         дорожная карта
