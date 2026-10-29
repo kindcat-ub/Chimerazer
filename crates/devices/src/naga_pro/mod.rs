@@ -4,6 +4,10 @@
 //! OpenRazer; see `docs/protocol/naga-pro.md` for the provenance of every
 //! command.
 
+pub mod params;
+pub mod restore;
+#[cfg(test)]
+mod sim;
 pub mod state;
 
 use std::fmt;
@@ -11,7 +15,7 @@ use std::time::Duration;
 
 use chimerazer_protocol::{ARGS_LEN, Command};
 
-use crate::{CommandSpec, Confirmation, Link, Model, UsbId};
+use crate::{CommandSpec, Confirmation, Link, Model, UsbId, WriteScope};
 
 pub const MODEL: Model = Model {
     name: "Razer Naga Pro",
@@ -315,6 +319,105 @@ pub const COMMANDS: &[CommandSpec] = &[
     LED_EFFECT,
     LED_BRIGHTNESS,
 ];
+
+pub const SET_POLL_RATE: CommandSpec = CommandSpec {
+    command: Command::new(0x00, 0x05, 0x01),
+    name: "set poll rate",
+    confirmation: Confirmation::SourceOnly,
+    sources: &["opensnek-usb-protocol", "openrazer-mouse"],
+};
+
+pub const SET_DPI: CommandSpec = CommandSpec {
+    command: Command::new(0x04, 0x05, 0x07),
+    name: "set DPI",
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m2-validation",
+        "opensnek-device-support",
+        "openrazer-mouse",
+        "snakecharmer-spec",
+    ],
+};
+
+pub const SET_DPI_STAGES: CommandSpec = CommandSpec {
+    command: Command::new(0x04, 0x06, 0x26),
+    name: "set DPI stages",
+    confirmation: Confirmation::OurHardware,
+    sources: &[
+        "chimerazer-m2-validation",
+        "opensnek-device-support",
+        "openrazer-mouse",
+    ],
+};
+
+pub const SET_LED_BRIGHTNESS: CommandSpec = CommandSpec {
+    command: Command::new(0x0F, 0x04, 0x03),
+    name: "set LED brightness",
+    confirmation: Confirmation::OurHardware,
+    sources: &["chimerazer-m2-validation", "opensnek-device-support"],
+};
+
+/// Where each verified write may run in normal operation (restore). Every
+/// entry is backed by a protocol in `docs/validation/naga-pro/`. Profiles
+/// 2–5, and the live layer through the receiver for stages and brightness,
+/// are not here because they have not been validated.
+pub const VERIFIED_WRITES: &[WriteScope] = &[
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Receiver,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_DPI.command,
+        link: Link::Receiver,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_DPI_STAGES.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_DPI_STAGES.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_DPI_STAGES.command,
+        link: Link::Receiver,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_LED_BRIGHTNESS.command,
+        link: Link::Wired,
+        storage: Some(LIVE_STORAGE),
+    },
+    WriteScope {
+        command: SET_LED_BRIGHTNESS.command,
+        link: Link::Wired,
+        storage: Some(1),
+    },
+    WriteScope {
+        command: SET_LED_BRIGHTNESS.command,
+        link: Link::Receiver,
+        storage: Some(1),
+    },
+];
+
+/// Write commands implemented in code. Every first write goes through
+/// [`params`] validation; see `docs/ARCHITECTURE.md`.
+pub const WRITE_COMMANDS: &[CommandSpec] =
+    &[SET_POLL_RATE, SET_DPI, SET_DPI_STAGES, SET_LED_BRIGHTNESS];
 
 /// A 7-byte button function block: `[class, len, data..]`.
 pub type FunctionBlock = [u8; 7];

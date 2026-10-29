@@ -103,5 +103,10 @@ fn check(doc: &str, catalog: &[CommandSpec]) {
 
 #[test]
 fn naga_pro_catalog_matches_docs() {
-    check("naga-pro.md", naga_pro::COMMANDS);
+    let all: Vec<CommandSpec> = naga_pro::COMMANDS
+        .iter()
+        .chain(naga_pro::WRITE_COMMANDS)
+        .copied()
+        .collect();
+    check("naga-pro.md", &all);
 }
