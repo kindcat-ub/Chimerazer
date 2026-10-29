@@ -4,6 +4,12 @@
 
 Статус: **M0 — фундамент**. С реальными устройствами программа пока не работает. План — в [`docs/ROADMAP.md`](docs/ROADMAP.md), устройство кода — в [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+Контейнерное окружение: [запуск `chimerazer-dev`](docs/DEVELOPMENT.md).
+
+```bash
+./.devcontainer/dev up --build -d
+```
+
 ## Сборка и проверки
 
 ```bash
