@@ -37,11 +37,12 @@ pub enum Param {
         storage: u8,
         led: u8,
     },
-    /// Button binding (`02:8C` / `02:0C`), layer 0. The value is the
-    /// 7-byte function block ([`super::binding`]).
+    /// Button binding (`02:8C` / `02:0C`) of layer 0, or 1 for HyperShift.
+    /// The value is the 7-byte function block ([`super::binding`]).
     Button {
         storage: u8,
         slot: u8,
+        layer: u8,
     },
 }
 
@@ -69,8 +70,13 @@ impl fmt::Display for Param {
             Self::Effect { storage, led } => {
                 write!(f, "effect (storage {storage}, led {led:#04x})")
             }
-            Self::Button { storage, slot } => {
-                write!(f, "button {slot} (storage {storage})")
+            Self::Button {
+                storage,
+                slot,
+                layer,
+            } => {
+                let hs = if *layer == 1 { ", hypershift" } else { "" };
+                write!(f, "button {slot} (storage {storage}{hs})")
             }
         }
     }
@@ -87,13 +93,25 @@ fn hex(bytes: &[u8]) -> String {
 impl Param {
     /// A button binding of one of the 30 slots in `BUTTON_SLOTS`.
     pub fn button(storage: u8, slot: u8) -> Result<Self, String> {
+        Self::button_layer(storage, slot, 0)
+    }
+
+    /// A button binding of layer 0 or of the HyperShift layer 1.
+    pub fn button_layer(storage: u8, slot: u8, layer: u8) -> Result<Self, String> {
+        if layer > 1 {
+            return Err(format!("layer {layer} is not 0 or 1"));
+        }
         if storage != LIVE_STORAGE && !PROFILES.contains(&storage) {
             return Err(format!("storage {storage} is not 0..=5"));
         }
         if !BUTTON_SLOTS.iter().any(|s| s.id == slot) {
             return Err(format!("slot {slot} is not one of the 30 Naga Pro slots"));
         }
-        Ok(Self::Button { storage, slot })
+        Ok(Self::Button {
+            storage,
+            slot,
+            layer,
+        })
     }
 
     /// Parses `poll-rate`, `dpi`, `dpi-stages`, `brightness`, `effect` with the
@@ -165,7 +183,11 @@ impl Param {
             Self::Brightness { storage, led } | Self::Effect { storage, led } => {
                 vec![storage, led]
             }
-            Self::Button { storage, slot } => vec![storage, slot, 0],
+            Self::Button {
+                storage,
+                slot,
+                layer,
+            } => vec![storage, slot, layer],
         }
     }
 
@@ -202,7 +224,7 @@ impl Param {
                 Ok(args[2..12].to_vec())
             }
             // args[2] is a stored flag, not an echo; the block follows it.
-            Self::Button { storage, slot } => {
+            Self::Button { storage, slot, .. } => {
                 echo(0, storage)?;
                 echo(1, slot)?;
                 Ok(args[3..10].to_vec())
@@ -226,7 +248,11 @@ impl Param {
                 };
                 [&[storage, led][..], &value[..n.min(value.len())]].concat()
             }
-            Self::Button { storage, slot } => [&[storage, slot, 0][..], value].concat(),
+            Self::Button {
+                storage,
+                slot,
+                layer,
+            } => [&[storage, slot, layer][..], value].concat(),
         }
     }
 
@@ -249,7 +275,14 @@ impl Param {
             Self::Effect { storage, led } => {
                 format!("{}.led.{}.effect", st(storage), led_name(led))
             }
-            Self::Button { storage, slot } => format!("{}.button.{slot:02}", st(storage)),
+            Self::Button {
+                storage,
+                slot,
+                layer,
+            } => {
+                let hs = if layer == 1 { ".hs" } else { "" };
+                format!("{}.button.{slot:02}{hs}", st(storage))
+            }
         }
     }
 
@@ -338,6 +371,10 @@ impl Param {
     }
 
     fn spec_verified(&self, spec: &CommandSpec, link: crate::Link) -> bool {
+        // Writes to the HyperShift layer are not verified on any link.
+        if let Self::Button { layer: 1, .. } = self {
+            return false;
+        }
         spec.confirmation == crate::Confirmation::OurHardware
             && VERIFIED_WRITES.iter().any(|s| {
                 // `Command` equality includes the size, which tells the
@@ -1387,6 +1424,31 @@ mod tests {
         let report = finish_hold(&mut sim, &USB, &held.unwrap(), &base, FIRST);
         assert_eq!(persisted(&report), Some(true));
         assert!(!report.passed, "{:#?}", report.steps);
+    }
+
+    /// On our unit a layer-0 write reset the stored flag (`args[2]`) from 1
+    /// to 0; the block read-back still matches, so only the final snapshot
+    /// can see it.
+    #[test]
+    fn stored_flag_reset_fails_the_final_snapshot() {
+        let mut sim = Sim::new();
+        sim.buttons.get_mut(&(0, 64)).unwrap().0 = 1;
+        let base = baseline(&mut sim);
+        let p = Param::button(0, 64).unwrap();
+        let report = validate(&mut sim, &USB, p, "key:q", &base, FIRST);
+        assert!(!report.passed);
+        let last = report.steps.last().unwrap();
+        assert_eq!(last.name, "final snapshot");
+        assert!(
+            !last.ok && last.note.contains("live.button.64"),
+            "{}",
+            last.note
+        );
+        // HyperShift-layer writes are never allowed in normal mode.
+        let hs = Param::button_layer(1, 64, 1).unwrap();
+        assert_eq!(hs.dump_key(), "p1.button.64.hs");
+        assert!(!hs.verified_on(crate::Link::Wired));
+        assert!(Param::button_layer(1, 64, 2).is_err());
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub fn candidates() -> Vec<Param> {
             out.push(Param::Button {
                 storage,
                 slot: slot.id,
+                layer: 0,
             });
         }
     }
@@ -250,6 +251,33 @@ pub fn set(io: &mut impl FeatureIo, usb: &UsbId, param: Param, text: &str) -> En
         ));
     } else {
         write_verified(io, usb, param, &value, &mut entry, NORMAL.mode);
+    }
+    entry
+}
+
+/// First-validation tool: reads `param` and writes the same value back,
+/// with a read-back. Used to probe what a write does besides the value
+/// (for example the stored flag of a button); never in normal operation.
+pub fn rewrite(io: &mut impl FeatureIo, usb: &UsbId, param: Param) -> Entry {
+    let mut entry = Entry {
+        param,
+        key: param.dump_key(),
+        target: None,
+        before: None,
+        after: None,
+        outcome: Outcome::NotAttempted,
+        traces: Vec::new(),
+    };
+    match read_value(io, usb, param, &mut entry.traces) {
+        Ok(value) => {
+            entry.before = Some(param.render(&value));
+            entry.target = entry.before.clone();
+            let mode = WriteMode::FirstValidation {
+                allow_source_only: false,
+            };
+            write_verified(io, usb, param, &value, &mut entry, mode);
+        }
+        Err(e) => entry.outcome = Outcome::Failed(format!("read: {e}")),
     }
     entry
 }
@@ -592,6 +620,17 @@ mod tests {
         assert_eq!(*outcome(&r, "p1.button.64"), Outcome::Unchanged);
         assert_eq!(sim.buttons[&(1, 85)].1, [0x02, 0x02, 0, 0x1E, 0, 0, 0]);
         assert!(r.remaining.is_empty(), "{:?}", r.remaining);
+    }
+
+    #[test]
+    fn rewrite_writes_the_same_value_with_the_requested_layer() {
+        let mut sim = Sim::new();
+        let hs = Param::button_layer(1, 64, 1).unwrap();
+        let e = rewrite(&mut sim, &WIRED, hs);
+        assert!(matches!(e.outcome, Outcome::Restored { .. }), "{e:?}");
+        assert_eq!(e.traces[1].request[8..11], [1, 64, 1]);
+        // In the simulator, as on our unit, the layer byte becomes the flag.
+        assert_eq!(sim.buttons[&(1, 64)].0, 1);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! `chimerazer` — command-line interface.
 
+mod watch;
+
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
@@ -26,6 +28,8 @@ usage:
   chimerazer restore <DUMP> [--dry-run] [--pid PID] [--log FILE]
   chimerazer set ITEM.. [--pid PID]
   chimerazer buttons <DUMP> [--storage N]
+  chimerazer watch [--seconds N]
+  chimerazer rewrite ITEM.. --pid PID
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
@@ -60,7 +64,12 @@ usage:
          key:[mods+]<key> (ctrl shift alt super, r-prefixed for right),
          dpi:<down|up|cycle>, profile-cycle or raw:<14 hex>; turbo=<rate>
          after mouse/key (key:up,turbo=55 or quoted \"key:up turbo=55\").
-  buttons  decodes the 30 button slots of a dump (no device access).";
+  buttons  decodes the 30 button slots of a dump (no device access).
+  watch  prints the keys, buttons and wheel events the mouse sends (evdev,
+         needs read access to /dev/input/event*, e.g. group input).
+  rewrite  research aid (first validation): reads each ITEM (as for set,
+         without the value: button:1:64, button-hs:1:64) and writes the
+         same value back with a read-back. --pid is required.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -75,6 +84,8 @@ fn main() -> ExitCode {
         Some("restore") => restore(&args[1..]),
         Some("set") => set(&args[1..]),
         Some("buttons") => buttons(&args[1..]),
+        Some("watch") => watch::watch(&args[1..]),
+        Some("rewrite") => rewrite(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -284,7 +295,11 @@ fn validate(args: &[String]) -> Result<(), String> {
 /// `dpi:1:800`, `dpi-stages:1:active=2`, `brightness:1:logo:100`.
 fn parse_item(item: &str) -> Result<(naga_pro::params::Param, String), String> {
     // The binding text may contain ':' itself (key:ctrl+f5).
-    if let Some(rest) = item.strip_prefix("button:") {
+    let button = item
+        .strip_prefix("button:")
+        .map(|r| (r, 0))
+        .or_else(|| item.strip_prefix("button-hs:").map(|r| (r, 1)));
+    if let Some((rest, layer)) = button {
         let mut parts = rest.splitn(3, ':');
         let (Some(st), Some(slot), Some(binding)) = (parts.next(), parts.next(), parts.next())
         else {
@@ -292,7 +307,7 @@ fn parse_item(item: &str) -> Result<(naga_pro::params::Param, String), String> {
         };
         let num = |s: &str| s.parse::<u8>().map_err(|_| format!("bad number in {item}"));
         return Ok((
-            naga_pro::params::Param::button(num(st)?, num(slot)?)?,
+            naga_pro::params::Param::button_layer(num(st)?, num(slot)?, layer)?,
             binding.to_string(),
         ));
     }
@@ -403,7 +418,12 @@ fn param_token(p: naga_pro::params::Param) -> String {
     use naga_pro::params::Param::*;
     match p {
         PollRate => "poll-rate:0".into(),
-        Button { storage, slot } => format!("button:{storage}:{slot}"),
+        Button {
+            storage,
+            slot,
+            layer: 0,
+        } => format!("button:{storage}:{slot}"),
+        Button { storage, slot, .. } => format!("button-hs:{storage}:{slot}"),
         Dpi { storage } => format!("dpi:{storage}"),
         DpiStages { storage } => format!("dpi-stages:{storage}"),
         Brightness { storage, led } | Effect { storage, led } => format!(
@@ -718,6 +738,42 @@ fn buttons(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn rewrite(args: &[String]) -> Result<(), String> {
+    let (mut pid, mut items) = (None, Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--pid" => {
+                let v = it.next().ok_or("--pid needs a value")?;
+                pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
+            item => items.push(parse_item(&format!("{item}:x"))?.0),
+        }
+    }
+    let pid = pid.ok_or("rewrite needs --pid")?;
+    if items.is_empty() {
+        return Err(USAGE.to_string());
+    }
+    let (hid, model, usb) = select(Some(pid))?;
+    if *model != naga_pro::MODEL {
+        return Err(format!("rewrite is not implemented for {}", model.name));
+    }
+    let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
+    for param in items {
+        let e = naga_pro::restore::rewrite(&mut dev, usb, param);
+        println!(
+            "{param}: {} -> {}: {}",
+            e.before.as_deref().unwrap_or("-"),
+            e.after.as_deref().unwrap_or("-"),
+            e.outcome
+        );
+        if !matches!(e.outcome, naga_pro::restore::Outcome::Restored { .. }) {
+            return Err(format!("stopped at {param}"));
+        }
+    }
+    Ok(())
+}
+
 fn write_log(log: Option<String>, md: &str) -> Result<(), String> {
     match log {
         Some(path) => std::fs::write(&path, md).map_err(|e| format!("{path}: {e}")),
@@ -928,6 +984,7 @@ mod tests {
             "effect:0:scroll_wheel:spectrum",
             "button:1:80:key:ctrl+f5",
             "button:0:85:key:up turbo=55",
+            "button-hs:1:64:key:1",
         ] {
             let (param, probe) = parse_item(item).unwrap();
             assert_eq!(format!("{}:{probe}", param_token(param)), item);

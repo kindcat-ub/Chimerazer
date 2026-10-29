@@ -65,7 +65,7 @@ impl Sim {
             }
             for slot in BUTTON_SLOTS {
                 let block = [0x02, 0x02, 0, 0x1E, 0, 0, 0];
-                s.buttons.insert((st, slot.id), (1, block));
+                s.buttons.insert((st, slot.id), (0, block));
                 s.hypershift
                     .insert((st, slot.id), [0x02, 0x02, 0, 0x1F, 0, 0, 0]);
             }
@@ -99,6 +99,9 @@ impl FeatureIo for Sim {
                 }
                 (0x02, 0x0C) => {
                     let block: [u8; 7] = a[3..10].try_into().unwrap();
+                    // As on our unit: the write's layer byte becomes the
+                    // slot's stored flag, whichever layer it addresses.
+                    self.buttons.get_mut(&(a[0], a[1])).unwrap().0 = a[2];
                     if a[2] == 1 {
                         self.hypershift.insert((a[0], a[1]), block);
                     } else {
