@@ -5,6 +5,9 @@
 //! command.
 
 pub mod params;
+pub mod restore;
+#[cfg(test)]
+mod sim;
 pub mod state;
 
 use std::fmt;

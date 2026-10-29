@@ -89,7 +89,7 @@ impl Param {
         }
     }
 
-    fn read_args(&self) -> Vec<u8> {
+    pub(crate) fn read_args(&self) -> Vec<u8> {
         match *self {
             Self::PollRate => vec![],
             Self::Dpi { storage } | Self::DpiStages { storage } => vec![storage],
@@ -135,6 +135,88 @@ impl Param {
             Self::DpiStages { storage } => [&[storage][..], value].concat(),
             Self::Brightness { storage, led } => [&[storage, led][..], value].concat(),
         }
+    }
+
+    /// The dump key holding this value (`naga_pro::state`).
+    pub fn dump_key(&self) -> String {
+        let st = |s: u8| {
+            if s == LIVE_STORAGE {
+                "live".to_string()
+            } else {
+                format!("p{s}")
+            }
+        };
+        match *self {
+            Self::PollRate => "device.poll_rate".into(),
+            Self::Dpi { storage } => format!("{}.dpi", st(storage)),
+            Self::DpiStages { storage } => format!("{}.dpi_stages.raw", st(storage)),
+            Self::Brightness { storage, led } => format!(
+                "{}.led.{}.brightness",
+                st(storage),
+                if led == LED_LOGO {
+                    "logo"
+                } else {
+                    "scroll_wheel"
+                }
+            ),
+        }
+    }
+
+    /// Dump keys whose value this parameter determines.
+    pub fn covered_keys(&self) -> Vec<String> {
+        let key = self.dump_key();
+        match self {
+            Self::DpiStages { .. } => {
+                let decoded = key.trim_end_matches(".raw").to_string();
+                vec![key, decoded]
+            }
+            _ => vec![key],
+        }
+    }
+
+    /// The value bytes stored in a dump under [`Param::dump_key`].
+    pub fn from_dump(&self, text: &str) -> Result<Vec<u8>, String> {
+        match self {
+            Self::PollRate => match text {
+                "1000 Hz" => Ok(vec![0x01]),
+                "500 Hz" => Ok(vec![0x02]),
+                "125 Hz" => Ok(vec![0x08]),
+                _ => Err(format!("unknown poll rate {text}")),
+            },
+            Self::Dpi { .. } => {
+                let (x, y) = text.split_once('x').ok_or(format!("bad DPI {text}"))?;
+                let p = |v: &str| v.parse::<u16>().map_err(|_| format!("bad DPI {text}"));
+                Ok([p(x)?.to_be_bytes(), p(y)?.to_be_bytes()].concat())
+            }
+            Self::DpiStages { .. } => {
+                let bytes: Vec<u8> = text
+                    .split_whitespace()
+                    .map(|b| u8::from_str_radix(b, 16).map_err(|_| format!("bad stages {text}")))
+                    .collect::<Result<_, _>>()?;
+                let count = usize::from(*bytes.get(1).ok_or("empty stages")?);
+                if count == 0 || count > 5 || bytes.len() != 2 + count * 7 {
+                    return Err(format!("bad stage table {text}"));
+                }
+                Ok(bytes)
+            }
+            Self::Brightness { .. } => Ok(vec![
+                text.parse().map_err(|_| format!("bad brightness {text}"))?,
+            ]),
+        }
+    }
+
+    /// Whether this value may be written in normal operation on `link`.
+    pub fn verified_on(&self, link: crate::Link) -> bool {
+        let storage = match *self {
+            Self::PollRate => None,
+            Self::Dpi { storage }
+            | Self::DpiStages { storage }
+            | Self::Brightness { storage, .. } => Some(storage),
+        };
+        self.write_spec().confirmation == crate::Confirmation::OurHardware
+            && VERIFIED_WRITES.iter().any(|s| {
+                s.command == self.write_spec().command && s.link == link && s.storage == storage
+            })
     }
 
     /// Human form of a value.
@@ -683,124 +765,8 @@ fn final_snapshot<IO: FeatureIo>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::io;
-    use std::time::Duration;
-
-    use chimerazer_protocol::{REPORT_LEN, Status, crc};
-
     use super::*;
-    use crate::Link;
-
-    const USB: UsbId = UsbId {
-        product_id: 0x008F,
-        link: Link::Wired,
-        interface: 0,
-        transaction_id: 0x1F,
-        response_delay: Duration::ZERO,
-    };
-
-    /// A simulated Naga Pro holding DPI, stages, brightness and poll rate.
-    /// Every other read answers with a fixed zero-filled OK frame.
-    #[derive(Default)]
-    struct Sim {
-        dpi: HashMap<u8, [u8; 4]>,
-        stages: HashMap<u8, Vec<u8>>,
-        brightness: HashMap<(u8, u8), u8>,
-        poll: u8,
-        ignore_writes: bool,
-        /// A write to DPI also changes brightness on storage 0, LED 1.
-        side_effect: bool,
-        /// Writes are applied but answered with status Failed.
-        nack_applied_writes: bool,
-        reply: Option<[u8; REPORT_LEN]>,
-    }
-
-    impl Sim {
-        fn new() -> Self {
-            let mut s = Self {
-                poll: 0x01,
-                ..Self::default()
-            };
-            for st in 0..=5 {
-                s.dpi.insert(st, [0x06, 0x40, 0x06, 0x40]);
-                let mut t = vec![0x03, 0x05];
-                for (id, dpi) in [(1u8, 400u16), (2, 800), (3, 1600), (4, 3200), (5, 6400)] {
-                    t.push(id);
-                    t.extend(dpi.to_be_bytes());
-                    t.extend(dpi.to_be_bytes());
-                    t.extend([0, 0]);
-                }
-                s.stages.insert(st, t);
-                s.brightness.insert((st, 0x01), 51);
-                s.brightness.insert((st, 0x04), 51);
-            }
-            s
-        }
-    }
-
-    impl FeatureIo for Sim {
-        fn send_feature(&mut self, report: &[u8]) -> io::Result<()> {
-            let mut out: [u8; REPORT_LEN] = report.try_into().unwrap();
-            let (class, id, a) = (report[6], report[7], &report[8..88]);
-            let mut args = [0u8; ARGS_LEN];
-            args.copy_from_slice(a);
-            let write = id & 0x80 == 0;
-            if write && !self.ignore_writes {
-                match (class, id) {
-                    (0x00, 0x05) => self.poll = a[0],
-                    (0x04, 0x05) => {
-                        self.dpi.insert(a[0], a[1..5].try_into().unwrap());
-                        if self.side_effect {
-                            self.brightness.insert((0, 0x01), 1);
-                        }
-                    }
-                    (0x04, 0x06) => {
-                        let n = 2 + usize::from(a[2]) * 7;
-                        self.stages.insert(a[0], a[1..1 + n].to_vec());
-                    }
-                    (0x0F, 0x04) => {
-                        self.brightness.insert((a[0], a[1]), a[2]);
-                    }
-                    _ => {}
-                }
-            }
-            if !write {
-                match (class, id) {
-                    (0x00, 0x85) => args[0] = self.poll,
-                    (0x04, 0x85) => args[1..5].copy_from_slice(&self.dpi[&a[0]]),
-                    (0x04, 0x86) => {
-                        let t = &self.stages[&a[0]];
-                        args[1..1 + t.len()].copy_from_slice(t);
-                    }
-                    (0x0F, 0x84) => args[2] = self.brightness[&(a[0], a[1])],
-                    (0x02, 0x84) => {
-                        args[0] = 30;
-                        for (i, s) in BUTTON_SLOTS.iter().enumerate() {
-                            args[1 + i] = s.id;
-                        }
-                    }
-                    (0x05, 0x81) => args[..5].copy_from_slice(&[5, 1, 2, 3, 4]),
-                    (0x00, 0x81) => args[..2].copy_from_slice(&[2, 3]),
-                    _ => {}
-                }
-            }
-            out[0] = if write && self.nack_applied_writes {
-                Status::Failed.to_byte()
-            } else {
-                Status::Ok.to_byte()
-            };
-            out[8..88].copy_from_slice(&args);
-            out[88] = crc(&out);
-            self.reply = Some(out);
-            Ok(())
-        }
-
-        fn get_feature(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            buf[..REPORT_LEN].copy_from_slice(&self.reply.unwrap());
-            Ok(REPORT_LEN)
-        }
-    }
+    use crate::naga_pro::sim::{Sim, USB};
 
     const FIRST: WriteMode = WriteMode::FirstValidation {
         allow_source_only: false,

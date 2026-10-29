@@ -1,4 +1,4 @@
-//! `chimerazer` — read-only command-line interface (M1).
+//! `chimerazer` — command-line interface.
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -23,6 +23,7 @@ usage:
                       [--allow-source-only]
   chimerazer hold ITEM.. --baseline DUMP --state FILE [--pid PID] [--log FILE]
   chimerazer finish <STATE> --baseline DUMP [--log FILE]
+  chimerazer restore <DUMP> [--dry-run] [--pid PID] [--log FILE]
 
   read   sends one catalogued read command; ARG are hex bytes
          (e.g. `chimerazer read 04:85 00`). Prints raw frames.
@@ -39,7 +40,13 @@ usage:
          dpi:<storage>:<probe>, dpi-stages:<storage>:active=<id> or
          brightness:<storage>:<logo|scroll_wheel>:<probe>. Writes each probe
          and leaves it in place; `finish` reads what survived the reconnect,
-         restores the originals and checks the whole device against DUMP.";
+         restores the originals and checks the whole device against DUMP.
+  restore  writes back the values of DUMP that have a verified write on
+         this link (DPI, DPI stages, LED brightness; profile 1 only by
+         wire). Refuses a DUMP with read errors or another active profile.
+         One value at a time, read back after each; no atomicity: a failure
+         stops the run and leaves earlier values written. --dry-run only
+         reports what would change.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,6 +58,7 @@ fn main() -> ExitCode {
         Some("validate") => validate(&args[1..]),
         Some("hold") => hold(&args[1..]),
         Some("finish") => finish(&args[1..]),
+        Some("restore") => restore(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -440,6 +448,127 @@ fn finish(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("FAILED: {label} (see the protocol)"))
+    }
+}
+
+fn restore(args: &[String]) -> Result<(), String> {
+    use naga_pro::restore::Outcome;
+
+    let (dump_path, rest) = args.split_first().ok_or(USAGE)?;
+    let (mut pid, mut log, mut dry_run) = (None, None, false);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        let mut value = || it.next().ok_or(format!("{a} needs a value"));
+        match a.as_str() {
+            "--log" => log = Some(value()?.clone()),
+            "--dry-run" => dry_run = true,
+            "--pid" => {
+                let v = value()?;
+                pid = Some(u16::from_str_radix(v, 16).map_err(|_| format!("bad pid {v}"))?);
+            }
+            other => return Err(format!("unexpected argument {other}\n{USAGE}")),
+        }
+    }
+    let (hid, model, usb) = select(pid)?;
+    if *model != naga_pro::MODEL {
+        return Err(format!("restore is not implemented for {}", model.name));
+    }
+    let dump = load_baseline(dump_path, model)?;
+    let mut dev = Hidraw::open(&hid.node).map_err(|e| format!("{}: {e}", hid.node.display()))?;
+    let report = naga_pro::restore::restore(&mut dev, usb, &dump, dry_run);
+
+    let mut md = format!(
+        "# Restore{}\n\n- model: {}\n- device: 1532:{:04x} {:?}\n- dump: `{dump_path}`\n\n\
+         Values are written one at a time; the device has no transaction. \
+         A failure stops the run and leaves the values written before it.\n",
+        if dry_run { " (dry run)" } else { "" },
+        model.name,
+        usb.product_id,
+        usb.link,
+    );
+    if let Some(why) = &report.refused {
+        md.push_str(&format!("\n**Refused, nothing written:** {why}\n"));
+    }
+    if !report.entries.is_empty() {
+        md.push_str(
+            "\n## Values\n\n| key | dump | before | after | outcome |\n|---|---|---|---|---|\n",
+        );
+        let cell = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+        for e in &report.entries {
+            md.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} |\n",
+                e.key,
+                cell(&e.target),
+                cell(&e.before),
+                cell(&e.after),
+                e.outcome
+            ));
+        }
+        let frames: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| !e.traces.is_empty())
+            .collect();
+        if !frames.is_empty() {
+            md.push_str("\n## Frames\n");
+            for e in frames {
+                md.push_str(&format!("\n`{}`\n\n```\n", e.key));
+                for t in &e.traces {
+                    md.push_str(&format!("> {}\n", hex(&t.request)));
+                    for r in &t.responses {
+                        md.push_str(&format!("< {}\n", hex(r)));
+                    }
+                }
+                md.push_str("```\n");
+            }
+        }
+    }
+    if !report.not_restorable.is_empty() {
+        md.push_str(&format!(
+            "\n## Not restorable ({})\n\nNo verified write: {}\n",
+            report.not_restorable.len(),
+            report
+                .not_restorable
+                .iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if report.refused.is_none() {
+        md.push_str(&format!(
+            "\n## Device vs dump after the run ({} differences)\n\n",
+            report.remaining.len()
+        ));
+        for (k, a, b) in &report.remaining {
+            md.push_str(&format!(
+                "- `{k}`: dump `{}`, device `{}`\n",
+                a.as_deref().unwrap_or("-"),
+                b.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    write_log(log, &md)?;
+
+    let count = |f: fn(&Outcome) -> bool| report.entries.iter().filter(|e| f(&e.outcome)).count();
+    let summary = format!(
+        "restored {}, unchanged {}, would restore {}, skipped {}, failed {}, not attempted {}, not restorable {}, differences left {}",
+        count(|o| matches!(o, Outcome::Restored { .. })),
+        count(|o| matches!(o, Outcome::Unchanged)),
+        count(|o| matches!(o, Outcome::WouldRestore)),
+        count(|o| matches!(o, Outcome::Skipped(_))),
+        count(|o| matches!(o, Outcome::Failed(_))),
+        count(|o| matches!(o, Outcome::NotAttempted)),
+        report.not_restorable.len(),
+        report.remaining.len(),
+    );
+    match &report.refused {
+        Some(why) => Err(format!("REFUSED: {why}")),
+        None if report.ok() => {
+            eprintln!("OK: {summary}");
+            Ok(())
+        }
+        None => Err(format!("FAILED: {summary}")),
     }
 }
 
